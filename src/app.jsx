@@ -11,20 +11,13 @@ function txToDashData(tx) {
   // Each event = ONE assistant turn (after applying the parse_session
   // turn-stats algorithm: user-text boundaries → last usage per turn).
   const RATES = {
-    'opus':   { in: 15/1e6, out: 75/1e6, c5: 18.75/1e6, c1h: 30/1e6, read: 1.5/1e6 },
-    'sonnet': { in: 3/1e6,  out: 15/1e6, c5: 3.75/1e6,  c1h: 6/1e6,  read: 0.3/1e6 },
-    'haiku':  { in: 1/1e6,  out: 5/1e6,  c5: 1.25/1e6,  c1h: 2/1e6,  read: 0.1/1e6 },
+    'kimi': { in: 0.95/1e6, out: 4.00/1e6, create: 0.00/1e6, read: 0.16/1e6 },
   };
   function rateFor(model) {
-    const m = (model || '').toLowerCase();
-    if (m.includes('opus')) return RATES.opus;
-    if (m.includes('haiku')) return RATES.haiku;
-    return RATES.sonnet;
+    return RATES.kimi;
   }
   function shortM(model) {
-    let s = model || 'unknown';
-    const mm = s.match(/(opus|sonnet|haiku)[-_]?(\d[-_]?\d?)/i);
-    return mm ? `${mm[1].toLowerCase()}-${mm[2].replace('_','-')}` : s;
+    return model || 'kimi';
   }
 
   // Group all assistant_usage records by sessionId, plus user-text events
@@ -95,11 +88,8 @@ function txToDashData(tx) {
       const cc  = us.cache_creation_input_tokens || 0;
       const cr  = us.cache_read_input_tokens || 0;
       if ((inp + cc + cr) === 0) continue; // refusal/interrupt
-      const eph5 = (us.cache_creation && us.cache_creation.ephemeral_5m_input_tokens) || 0;
-      const eph1h = (us.cache_creation && us.cache_creation.ephemeral_1h_input_tokens) || 0;
       const r = rateFor(u.model);
-      const unsplit = Math.max(0, cc - eph5 - eph1h);
-      const cost = inp * r.in + out * r.out + (eph5 + unsplit) * r.c5 + eph1h * r.c1h + cr * r.read;
+      const cost = inp * r.in + out * r.out + cc * r.create + cr * r.read;
       events.push({
         ts: t,
         session_id: sid,
@@ -109,8 +99,6 @@ function txToDashData(tx) {
         output_tokens: out,
         cache_create: cc,
         cache_read: cr,
-        ephemeral_5m: eph5,
-        ephemeral_1h: eph1h,
         cost_usd: cost,
         ctx: window.usageCtxInput(us),
       });
@@ -440,10 +428,8 @@ function backendDashToShape(b) {
     model: h.model || 'unknown',
     input_tokens: h.input_tokens,
     output_tokens: h.output_tokens,
-    cache_create: h.cache_5m_tokens + h.cache_1h_tokens,
+    cache_create: h.cache_create_tokens || 0,
     cache_read: h.cache_read_tokens,
-    ephemeral_5m: h.cache_5m_tokens,
-    ephemeral_1h: h.cache_1h_tokens,
     cost_usd: h.cost_usd,
     requests: h.requests || 1,
     session_count: h.session_count || 0,
@@ -474,8 +460,6 @@ function backendDashToShape(b) {
       output_tokens: s.output_tokens,
       cache_create: s.cache_create_tokens,
       cache_read: s.cache_read_tokens,
-      ephemeral_5m: 0,
-      ephemeral_1h: 0,
       cost_usd: s.cost_usd,
       requests: s.requests,
     };
@@ -568,13 +552,12 @@ function Dashboard({ synth, dataLabel, models, backendOn, activeProject, activeR
   const windowBoundaries = computed.windowBoundaries;
 
   const totals = useMemo(() => {
-    const t = { input: 0, output: 0, cc: 0, cr: 0, cost: 0, eph5: 0, eph1h: 0 };
+    const t = { input: 0, output: 0, cc: 0, cr: 0, cost: 0 };
     const byModel = {};
     for (const e of events) {
       t.input += e.input_tokens; t.output += e.output_tokens;
       t.cc += e.cache_create; t.cr += e.cache_read;
       t.cost += e.cost_usd;
-      t.eph5 += e.ephemeral_5m; t.eph1h += e.ephemeral_1h;
       byModel[e.model] = (byModel[e.model] || 0) + e.cost_usd;
     }
     t.total = t.input + t.output + t.cc + t.cr;
@@ -600,41 +583,29 @@ function Dashboard({ synth, dataLabel, models, backendOn, activeProject, activeR
     return (ms/(24*3600_000)) + 'd';
   }
 
-  // Cache Create is split into 5m and 1h ephemerals; any leftover
-  // (legacy SDK rows that didn't carry the ephemeral_* split) is
-  // bucketed under "Cache Create (unsplit)" so it stays visible.
-  const ccUnsplit = Math.max(0, totals.cc - totals.eph5 - totals.eph1h);
-
   // Per-token-type cost — sum tokens × per-model rate over hourly
   // events using the shared rate table from parser.js. Lets the Token
   // Breakdown panel show "{tokens} ({tok%}), ${cost} ({cost%})" per row.
   const costByType = useMemo(() => {
-    const c = { input: 0, output: 0, eph5: 0, eph1h: 0, ccUnsplit: 0, cr: 0, total: 0 };
+    const c = { input: 0, output: 0, cc: 0, cr: 0, total: 0 };
     if (!window.rateForModel) return c;
     for (const e of events) {
       const r = window.rateForModel(e.model);
-      const unsplit = Math.max(0, (e.cache_create || 0) - (e.ephemeral_5m || 0) - (e.ephemeral_1h || 0));
-      c.input     += (e.input_tokens   || 0) * r.fresh;
-      c.output    += (e.output_tokens  || 0) * r.out;
-      c.eph5      += (e.ephemeral_5m   || 0) * r.c5;
-      c.eph1h     += (e.ephemeral_1h   || 0) * r.c1h;
-      c.ccUnsplit += unsplit                  * r.c5;  // unsplit at 5m rate
-      c.cr        += (e.cache_read     || 0) * r.read;
+      c.input  += (e.input_tokens   || 0) * r.fresh;
+      c.output += (e.output_tokens  || 0) * r.out;
+      c.cc     += (e.cache_create   || 0) * r.create;
+      c.cr     += (e.cache_read     || 0) * r.read;
     }
     for (const k of Object.keys(c)) c[k] = c[k] / 1_000_000;
-    c.total = c.input + c.output + c.eph5 + c.eph1h + c.ccUnsplit + c.cr;
+    c.total = c.input + c.output + c.cc + c.cr;
     return c;
   }, [events]);
 
   const tokenBreakdown = [
-    { label: 'Input',             value: totals.input,  cost: costByType.input,     color: window.dashboardCol.inputTokens },
-    { label: 'Output',            value: totals.output, cost: costByType.output,    color: window.dashboardCol.outputTokens },
-    { label: 'Cache Create (5m)', value: totals.eph5,   cost: costByType.eph5,      color: window.dashboardCol.cacheCreateTokens },
-    { label: 'Cache Create (1h)', value: totals.eph1h,  cost: costByType.eph1h,     color: '#d488ff' },
-    ...(ccUnsplit > 0
-      ? [{ label: 'Cache Create (unsplit)', value: ccUnsplit, cost: costByType.ccUnsplit, color: '#7733aa' }]
-      : []),
-    { label: 'Cache Read',        value: totals.cr,     cost: costByType.cr,        color: window.dashboardCol.cacheReadTokens },
+    { label: 'Input',      value: totals.input,  cost: costByType.input,  color: window.dashboardCol.inputTokens },
+    { label: 'Output',     value: totals.output, cost: costByType.output, color: window.dashboardCol.outputTokens },
+    { label: 'Cache Create', value: totals.cc,   cost: costByType.cc,     color: window.dashboardCol.cacheCreateTokens },
+    { label: 'Cache Read', value: totals.cr,     cost: costByType.cr,     color: window.dashboardCol.cacheReadTokens },
   ].filter(r => r.value > 0).sort((a, b) => b.cost - a.cost);
   const tokenBreakdownTotal = totals.total || 1;
   const tokenBreakdownCostTotal = costByType.total || 1;
@@ -695,10 +666,6 @@ function Dashboard({ synth, dataLabel, models, backendOn, activeProject, activeR
               .sort((a, b) => b.value - a.value)}
             fmt={r => `${window.humanCurrency(r.value)} (${(r.value / tokenBreakdownCostTotal * 100).toFixed(1)}%)`} />
         </div>
-      </div>
-
-      <div className="dash-ttl">
-        <window.CacheTTLPanel events={events} range={range} binMs={binMs} />
       </div>
 
       {responseSizes && responseSizes.length > 0 && (

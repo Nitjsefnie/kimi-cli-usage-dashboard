@@ -17,9 +17,19 @@ const DEFAULT_RATES = MODEL_RATES["kimi-k2-6"];
 window.rateForModel = function rateForModel(model) {
   if (!model) return DEFAULT_RATES;
   for (const key in MODEL_RATES) {
-    if (model.includes(key)) return MODEL_RATES[key];
+    if (model.includes(key)) {
+      const r = MODEL_RATES[key];
+      return {
+        fresh: r.fresh, create: r.create, read: r.read, output: r.output,
+        out: r.output, c5: r.create, c1h: 0,
+      };
+    }
   }
-  return DEFAULT_RATES;
+  const r = DEFAULT_RATES;
+  return {
+    fresh: r.fresh, create: r.create, read: r.read, output: r.output,
+    out: r.output, c5: r.create, c1h: 0,
+  };
 };
 
 function parseTimestamp(ts) {

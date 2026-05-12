@@ -863,7 +863,7 @@ async def dashboard(
                    COALESCE(NULLIF(d.model, ''), 'unknown') AS model,
                    SUM(d.fresh_tokens)     AS input_tokens,
                    SUM(d.output_tokens)    AS output_tokens,
-                   
+                   SUM(d.cache_creation_tokens) AS cache_create_tokens,
                    SUM(d.cache_read_tokens) AS cache_read_tokens,
                    SUM(d.cost_usd)         AS cost_usd,
                    COUNT(*)                AS requests,
@@ -1104,7 +1104,7 @@ async def dashboard(
     hourly = []
     seen_hours: set[str | None] = set()
     for row in hourly_rows:
-        (hour, model, input_t, output_t, cr, cost, reqs, sc) = row
+        (hour, model, input_t, output_t, cc, cr, cost, reqs, sc) = row
         hour_iso = _iso(hour)
         is_first_for_hour = hour_iso not in seen_hours
         seen_hours.add(hour_iso)
@@ -1113,7 +1113,7 @@ async def dashboard(
             "model": model or "unknown",
             "input_tokens": int(input_t or 0),
             "output_tokens": int(output_t or 0),
-            
+            "cache_create_tokens": int(cc or 0),
             "cache_read_tokens": int(cr or 0),
             "cost_usd": float(cost or 0),
             "requests": int(reqs or 0),
@@ -1247,7 +1247,7 @@ def _aggregate_session_row(row) -> dict:
     """Shared row-builder for /api/sessions and /api/sessions/{id}."""
     (
         session_id, project_id, first_at, last_at, dur_s, req_count,
-        input_t, output_t, cr, cost, models_raw,
+        input_t, output_t, cc, cr, cost, models_raw,
     ) = row
     models = {}
     if models_raw:
@@ -1266,7 +1266,7 @@ def _aggregate_session_row(row) -> dict:
         "request_count": int(req_count or 0),
         "input_tokens": int(input_t or 0),
         "output_tokens": int(output_t or 0),
-        
+        "cache_create_tokens": int(cc or 0),
         "cache_read_tokens": int(cr or 0),
         "cost_usd": float(cost or 0),
         "models": models,
@@ -1334,7 +1334,7 @@ async def list_sessions(
              COUNT(*) AS request_count,
              SUM(d.fresh_tokens)         AS input_tokens,
              SUM(d.output_tokens)        AS output_tokens,
-             
+             SUM(d.cache_creation_tokens) AS cache_creation_tokens,
              SUM(d.cache_read_tokens)    AS cache_read_tokens,
              SUM(d.cost_usd)             AS cost_usd,
              (SELECT json_agg(json_build_object('model', model, 'count', c))
@@ -1392,7 +1392,7 @@ async def session_detail(session_id: str) -> dict:
                      COUNT(*) AS request_count,
                      SUM(r.fresh_tokens)         AS input_tokens,
                      SUM(r.output_tokens)        AS output_tokens,
-                     
+                     SUM(r.cache_creation_tokens) AS cache_creation_tokens,
                      SUM(r.cache_read_tokens)    AS cache_read_tokens,
                      SUM(r.cost_usd)             AS cost_usd,
                      (SELECT json_agg(json_build_object('model', model, 'count', c))
@@ -1423,13 +1423,13 @@ async def session_detail(session_id: str) -> dict:
     (
         sid, project_id, file_key, ctx_turns,
         first_at, last_at, dur_s, req_count,
-        input_t, output_t, cr, cost,
+        input_t, output_t, cc, cr, cost,
         models_raw, dom_model,
     ) = row
 
     base = _aggregate_session_row((
         sid, project_id, first_at, last_at, dur_s, req_count,
-        input_t, output_t, cr, cost, models_raw,
+        input_t, output_t, cc, cr, cost, models_raw,
     ))
 
     # ctx_trace from ctx_turns (already canonical [{idx,ts,line,input,output,delta}])
