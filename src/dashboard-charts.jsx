@@ -23,7 +23,6 @@ const TH = {
 const COL = {
   inputTokens:       cssVar('--accent', '#00d4aa'),
   outputTokens:      '#ff9c5a',
-  cacheCreateTokens: 'oklch(0.72 0.14 305)',
   cacheReadTokens:   'oklch(0.72 0.14 25)',
   totalTokens:       'oklch(0.78 0.14 245)',
   costUSD:           cssVar('--gold', 'oklch(0.85 0.14 90)'),
@@ -413,7 +412,7 @@ function HBar({ title, rows, totalForPct, fmt, fixedColors }) {
 }
 
 // --- Burn rate panel ---
-function BurnRatePanel({ events, sessions, limitHits, range, windowBoundaries }) {
+function BurnRatePanel({ events, sessions, limitHits, range: propRange, windowBoundaries }) {
   const ref = React.useRef(null);
   const [size, setSize] = React.useState({ w: 1200, h: 360 });
   const [tip, setTip] = React.useState(null);
@@ -428,6 +427,25 @@ function BurnRatePanel({ events, sessions, limitHits, range, windowBoundaries })
     return () => ro.disconnect();
   }, []);
   const { w, h } = size;
+
+  // The prop range is derived from hourly bucket MIDPOINTS, so it
+  // doesn't match what this chart plots (raw session start/end + limit
+  // hits). Derive a data-envelope range here so sessions never escape
+  // the plot box on the left and the chart never trails into empty
+  // space on the right.
+  const range = (() => {
+    let lo = Infinity, hi = -Infinity;
+    // Sessions (dots + EMA polylines) are plotted at midpoints, so the
+    // range that makes them fill the plot is the min/max of midpoints.
+    for (const s of sessions) {
+      const mid = (s.start + s.end) / 2;
+      if (mid < lo) lo = mid;
+      if (mid > hi) hi = mid;
+    }
+    for (const lh of limitHits) { if (lh.ts < lo) lo = lh.ts; if (lh.ts > hi) hi = lh.ts; }
+    if (lo === Infinity || lo === hi) return propRange;
+    return { start: lo, end: hi };
+  })();
   // Top is just title (no legend); bottom has x-tick labels + the legend.
   const padL = 60, padR = 30, padT = 30, padB = 56;
   const plotW = Math.max(10, w - padL - padR);
@@ -443,17 +461,16 @@ function BurnRatePanel({ events, sessions, limitHits, range, windowBoundaries })
   const sessionData = sortedSessions.map((s, i) => {
     const dur = (s.end - s.start) / 3600000;
     const durH = Math.max(dur, 1/60);
-    const sums = { input: 0, output: 0, cc: 0, cr: 0, cost: 0 };
+    const sums = { input: 0, output: 0, cr: 0, cost: 0 };
     const modelCounts = {};
     for (const e of s.events) {
       sums.input += e.input_tokens;
       sums.output += e.output_tokens;
-      sums.cc += e.cache_create;
       sums.cr += e.cache_read;
       sums.cost += e.cost_usd;
       modelCounts[e.model] = (modelCounts[e.model] || 0) + 1;
     }
-    let primary = 'opus-4-6', max = 0;
+    let primary = 'kimi-k2-6', max = 0;
     for (const [m, c] of Object.entries(modelCounts)) if (c > max) { max = c; primary = m; }
     return {
       idx: i,
@@ -466,7 +483,6 @@ function BurnRatePanel({ events, sessions, limitHits, range, windowBoundaries })
       sums,
       out_per_h:    sums.output / durH,
       input_per_h:  sums.input / durH,
-      cc_per_h:     sums.cc / durH,
       cr_per_h:     sums.cr / durH,
       // Cost/h scaled by 100 so dots share the EMA's tokens-per-hour
       // log axis without needing a second scale: $1/h ≈ 100 tok/h ≈ same
@@ -485,7 +501,6 @@ function BurnRatePanel({ events, sessions, limitHits, range, windowBoundaries })
   const series = {
     output: { color: '#ee4444', label: 'Output', vals: ema(sessionData.map(s => s.out_per_h)) },
     input:  { color: '#44dd66', label: 'Input',  vals: ema(sessionData.map(s => s.input_per_h)) },
-    cc:     { color: '#dd66aa', label: 'Cache Create', vals: ema(sessionData.map(s => s.cc_per_h)) },
     cr:     { color: '#44bbbb', label: 'Cache Read',   vals: ema(sessionData.map(s => s.cr_per_h)) },
   };
 
@@ -574,7 +589,7 @@ function BurnRatePanel({ events, sessions, limitHits, range, windowBoundaries })
         lines: [['when', fmtDate(nearLimit.ts, {full:true}) + ' UTC']] });
       return;
     }
-    // Check proximity to EMA lines (output/input/cache create/cache read).
+    // Check proximity to EMA lines (output/input/cache read).
     // Use the densified curves so hover works along the whole line, not
     // only where session points exist.
     if (sessionData.length > 0) {
@@ -654,10 +669,22 @@ function BurnRatePanel({ events, sessions, limitHits, range, windowBoundaries })
     onMouseMove={onMove}
     onMouseLeave={() => setTip(null)}>
       <svg width={w} height={h} style={{ display: 'block' }}>
+        <defs>
+          <clipPath id="burn-plot-clip">
+            <rect x={padL} y={padT} width={plotW} height={plotH} />
+          </clipPath>
+        </defs>
         <text x={w/2} y={20} fontSize="14" fontWeight="bold" fill={TH.text}
           textAnchor="middle" fontFamily="monospace">
           Session Burn Rate  |  {fmtDate(range.start, {day:true})} – {fmtDate(range.end, {day:true})}, {new Date(range.end).getUTCFullYear()} UTC  |  {sessions.length.toLocaleString()} sessions, {events.reduce((s,e)=>s+(e.requests==null?1:e.requests),0).toLocaleString()} requests
         </text>
+        {yTicks.map((v, i) => (
+          <text key={'yl'+i} x={padL - 8} y={yScale(v) + 4}
+            fontSize="10" fill={TH.textDim} textAnchor="end" fontFamily="monospace">
+            {humanFmt(v)}
+          </text>
+        ))}
+        <g clipPath="url(#burn-plot-clip)">
         {windowBoundaries.map((wb, i) => (
           <line key={'wb'+i} x1={xScale(wb)} x2={xScale(wb)}
             y1={padT} y2={padT + plotH}
@@ -667,12 +694,6 @@ function BurnRatePanel({ events, sessions, limitHits, range, windowBoundaries })
           <line key={'yg'+i} x1={padL} x2={w-padR}
             y1={yScale(v)} y2={yScale(v)}
             stroke={TH.grid} strokeOpacity="0.25" />
-        ))}
-        {yTicks.map((v, i) => (
-          <text key={'yl'+i} x={padL - 8} y={yScale(v) + 4}
-            fontSize="10" fill={TH.textDim} textAnchor="end" fontFamily="monospace">
-            {humanFmt(v)}
-          </text>
         ))}
         {sessionData.map((s, i) => {
           // Scale dot AREA by ctx-at-end-of-session.
@@ -709,6 +730,7 @@ function BurnRatePanel({ events, sessions, limitHits, range, windowBoundaries })
             y1={padT} y2={padT + plotH}
             stroke="#ff3366" strokeWidth="2" strokeOpacity="0.7" />
         ))}
+        </g>
         {xTicks.map((t, i) => (
           <text key={'x'+i} x={xScale(t)} y={h - padB + 14}
             fontSize="10" fill={TH.textDim} textAnchor="middle" fontFamily="monospace">
