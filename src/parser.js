@@ -369,7 +369,7 @@ window.computeCache = function computeCache(metaEvents) {
     `StatusUpdates: ${count}`,
     `  input total:     ${totalIn.toLocaleString().padStart(12)}`,
     `    fresh:         ${totalInputOther.toLocaleString().padStart(12)}`,
-    `    cache_create:  ${totalCacheCreate.toLocaleString().padStart(12)}`,
+    totalCacheCreate ? `    cache_create:  ${totalCacheCreate.toLocaleString().padStart(12)}` : "",
     `    cache_read:    ${totalCacheRead.toLocaleString().padStart(12)}`,
     `  output:          ${totalOutput.toLocaleString().padStart(12)}`,
     `  hit rate:        ${hit.toFixed(1)}%`,

@@ -1,10 +1,10 @@
 // Per-turn context growth view for the Inspector.
-// Mirrors `analyze --turn-stats` from parse_session.py:
+// Mirrors `parse_wire.py --context-growth`:
 //   1. Walk events chronologically.
 //   2. User text messages with non-empty text content are turn boundaries.
 //      (User messages that are tool_result-only don't count.)
 //   3. For each turn, take the LAST assistant_usage record before the
-//      next boundary as that turn's context size = input + cache_create + cache_read.
+//      next boundary as that turn's context size = input + cache_read.
 //   4. Drop turns where input == 0 (API refusals / interrupts).
 //
 // Renders: a sparkline-style chart of input over turns, plus a dense table.
@@ -55,12 +55,8 @@ function computeTurnStats(tx) {
     const last = t.usages[t.usages.length - 1];
     const u = last.usage || {};
     const inp = u.input_tokens || 0;
-    const cc = u.cache_creation_input_tokens || 0;
     const cr = u.cache_read_input_tokens || 0;
     const out = u.output_tokens || 0;
-    // Peak per-call context — max-of-iteration-totals when the turn
-    // fanned out via advisor()/sub-agent; otherwise the top-level sum.
-    // Top-level inp/cc/cr stay as billing sums for the breakdown columns.
     const ctx = window.usageCtxInput(u);
     if (ctx === 0) continue; // refusal / interrupt
     const delta = prevInput !== null ? ctx - prevInput : null;
@@ -70,7 +66,6 @@ function computeTurnStats(tx) {
       ts: last.ts,
       model: last.model,
       input: inp,
-      cacheCreate: cc,
       cacheRead: cr,
       output: out,
       ctx,
@@ -131,7 +126,6 @@ function ContextGrowthView({ tx }) {
               <th>time</th>
               <th>model</th>
               <th className="num">input</th>
-              <th className="num">cache_cr</th>
               <th className="num">cache_rd</th>
               <th className="num">output</th>
               <th className="num">ctx</th>
@@ -153,7 +147,6 @@ function ContextGrowthView({ tx }) {
                   <td className="mono dim">{window.shortTime(r.ts)}</td>
                   <td className="mono">{shortModel(r.model)}</td>
                   <td className="num mono">{window.humanFmt(r.input)}</td>
-                  <td className="num mono dim">{r.cacheCreate ? window.humanFmt(r.cacheCreate) : '—'}</td>
                   <td className="num mono dim">{r.cacheRead ? window.humanFmt(r.cacheRead) : '—'}</td>
                   <td className="num mono">{r.output ? window.humanFmt(r.output) : '—'}</td>
                   <td className="num mono">{window.humanFmt(r.ctx)}</td>
@@ -326,7 +319,6 @@ function ContextChart({ rows, cap, hoverIdx, setHoverIdx }) {
             </div>
             <Tip k="ctx"      v={window.humanFmt(r.ctx) + ' (' + (r.ctx/cap*100).toFixed(1) + '% cap)'} />
             <Tip k="input"    v={window.humanFmt(r.input)} />
-            <Tip k="cache_cr" v={r.cacheCreate ? window.humanFmt(r.cacheCreate) : '—'} />
             <Tip k="cache_rd" v={r.cacheRead ? window.humanFmt(r.cacheRead) : '—'} />
             <Tip k="output"   v={r.output ? window.humanFmt(r.output) : '—'} />
             <Tip k="Δ"        v={r.delta == null ? '—' : (r.delta >= 0 ? '+' : '') + window.humanFmt(r.delta)} />

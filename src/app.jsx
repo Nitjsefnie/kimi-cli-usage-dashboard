@@ -85,11 +85,10 @@ function txToDashData(tx) {
       const us = u.usage || {};
       const inp = us.input_tokens || 0;
       const out = us.output_tokens || 0;
-      const cc  = us.cache_creation_input_tokens || 0;
       const cr  = us.cache_read_input_tokens || 0;
-      if ((inp + cc + cr) === 0) continue; // refusal/interrupt
+      if ((inp + cr) === 0) continue; // refusal/interrupt
       const r = rateFor(u.model);
-      const cost = inp * r.in + out * r.out + cc * r.create + cr * r.read;
+      const cost = inp * r.in + out * r.out + cr * r.read;
       events.push({
         ts: t,
         session_id: sid,
@@ -97,7 +96,6 @@ function txToDashData(tx) {
         model: shortM(u.model),
         input_tokens: inp,
         output_tokens: out,
-        cache_create: cc,
         cache_read: cr,
         cost_usd: cost,
         ctx: window.usageCtxInput(us),
@@ -428,19 +426,12 @@ function backendDashToShape(b) {
     model: h.model || 'unknown',
     input_tokens: h.input_tokens,
     output_tokens: h.output_tokens,
-    cache_create: h.cache_create_tokens || 0,
     cache_read: h.cache_read_tokens,
     cost_usd: h.cost_usd,
     requests: h.requests || 1,
     session_count: h.session_count || 0,
   })).filter(e => !isNaN(e.ts));
   if (!events.length) return null;
-  const start = events[0].ts;
-  // +1ms so the bin loop's strict `events[ci].ts < bEnd` includes the
-  // last event (its ts == range.end otherwise gets dropped, dropping
-  // ~1 bucket from the cumulative line and creating the $14.2K vs
-  // $15K mismatch with the summary stat).
-  const end = events[events.length - 1].ts + 1;
   const costByModel = (b.cost_by_model || []).reduce((acc, r) => {
     acc[r.model] = (acc[r.model] || 0) + (r.cost_usd || 0);
     return acc;
@@ -458,7 +449,6 @@ function backendDashToShape(b) {
       model: s.model || 'unknown',
       input_tokens: s.input_tokens,
       output_tokens: s.output_tokens,
-      cache_create: s.cache_create_tokens,
       cache_read: s.cache_read_tokens,
       cost_usd: s.cost_usd,
       requests: s.requests,
@@ -475,6 +465,12 @@ function backendDashToShape(b) {
       turns: s.turns || [],
     };
   });
+  const start = events[0].ts;
+  // +1ms so the bin loop's strict `events[ci].ts < bEnd` includes the
+  // last event (its ts == range.end otherwise gets dropped, dropping
+  // ~1 bucket from the cumulative line and creating the $14.2K vs
+  // $15K mismatch with the summary stat).
+  const end = events[events.length - 1].ts + 1;
   return {
     events, limitHits, range: { start, end }, costByModel,
     sessionsOverride: sessions,
@@ -552,15 +548,15 @@ function Dashboard({ synth, dataLabel, models, backendOn, activeProject, activeR
   const windowBoundaries = computed.windowBoundaries;
 
   const totals = useMemo(() => {
-    const t = { input: 0, output: 0, cc: 0, cr: 0, cost: 0 };
+    const t = { input: 0, output: 0, cr: 0, cost: 0 };
     const byModel = {};
     for (const e of events) {
       t.input += e.input_tokens; t.output += e.output_tokens;
-      t.cc += e.cache_create; t.cr += e.cache_read;
+      t.cr += e.cache_read;
       t.cost += e.cost_usd;
       byModel[e.model] = (byModel[e.model] || 0) + e.cost_usd;
     }
-    t.total = t.input + t.output + t.cc + t.cr;
+    t.total = t.input + t.output + t.cr;
     return { ...t, byModel: hasBackendByModel ? backendByModel : byModel };
   }, [events, backendByModel, hasBackendByModel]);
 
@@ -587,24 +583,22 @@ function Dashboard({ synth, dataLabel, models, backendOn, activeProject, activeR
   // events using the shared rate table from parser.js. Lets the Token
   // Breakdown panel show "{tokens} ({tok%}), ${cost} ({cost%})" per row.
   const costByType = useMemo(() => {
-    const c = { input: 0, output: 0, cc: 0, cr: 0, total: 0 };
+    const c = { input: 0, output: 0, cr: 0, total: 0 };
     if (!window.rateForModel) return c;
     for (const e of events) {
       const r = window.rateForModel(e.model);
       c.input  += (e.input_tokens   || 0) * r.fresh;
       c.output += (e.output_tokens  || 0) * r.out;
-      c.cc     += (e.cache_create   || 0) * r.create;
       c.cr     += (e.cache_read     || 0) * r.read;
     }
     for (const k of Object.keys(c)) c[k] = c[k] / 1_000_000;
-    c.total = c.input + c.output + c.cc + c.cr;
+    c.total = c.input + c.output + c.cr;
     return c;
   }, [events]);
 
   const tokenBreakdown = [
     { label: 'Input',      value: totals.input,  cost: costByType.input,  color: window.dashboardCol.inputTokens },
     { label: 'Output',     value: totals.output, cost: costByType.output, color: window.dashboardCol.outputTokens },
-    { label: 'Cache Create', value: totals.cc,   cost: costByType.cc,     color: window.dashboardCol.cacheCreateTokens },
     { label: 'Cache Read', value: totals.cr,     cost: costByType.cr,     color: window.dashboardCol.cacheReadTokens },
   ].filter(r => r.value > 0).sort((a, b) => b.cost - a.cost);
   const tokenBreakdownTotal = totals.total || 1;
@@ -638,11 +632,9 @@ function Dashboard({ synth, dataLabel, models, backendOn, activeProject, activeR
           color={window.dashboardCol.inputTokens} range={range} binMs={binMs} />
         <window.TimeSeriesPanel title="Output Tokens" events={events} valueKey="output_tokens"
           color={window.dashboardCol.outputTokens} range={range} binMs={binMs} />
-        <window.TimeSeriesPanel title="Cache Create"  events={events} valueKey="cache_create"
-          color={window.dashboardCol.cacheCreateTokens} range={range} binMs={binMs} />
         <window.TimeSeriesPanel title="Cache Read"    events={events} valueKey="cache_read"
           color={window.dashboardCol.cacheReadTokens} range={range} binMs={binMs} />
-        <window.TimeSeriesPanel title="Total Tokens"  events={events.map(e => ({...e, _t: e.input_tokens+e.output_tokens+e.cache_create+e.cache_read}))}
+        <window.TimeSeriesPanel title="Total Tokens"  events={events.map(e => ({...e, _t: e.input_tokens+e.output_tokens+e.cache_read}))}
           valueKey="_t" color={window.dashboardCol.totalTokens} range={range} binMs={binMs} />
         <window.TimeSeriesPanel title="Cost (USD)"    events={events} valueKey="cost_usd"
           color={window.dashboardCol.costUSD} range={range} binMs={binMs} isCurrency />
@@ -819,7 +811,7 @@ function SessionsList({ synth, onOpen }) {
       arr = synth.sessionsOverride.map(s => {
         const ev = (s.events && s.events[0]) || {};
         const total = (ev.input_tokens || 0) + (ev.output_tokens || 0)
-                    + (ev.cache_create || 0) + (ev.cache_read || 0);
+                    + (ev.cache_read || 0);
         return {
           id: s.session_id,
           start: s.start, end: s.end,
@@ -834,15 +826,15 @@ function SessionsList({ synth, onOpen }) {
       // Synth/live fallback: cluster the hourly events as before.
       const { sessions } = computeSessions(synth.events);
       arr = sessions.map((s, i) => {
-        const sums = { input: 0, output: 0, cc: 0, cr: 0, cost: 0 };
+        const sums = { input: 0, output: 0, cr: 0, cost: 0 };
         const models = {};
         for (const e of s.events) {
           sums.input += e.input_tokens; sums.output += e.output_tokens;
-          sums.cc += e.cache_create; sums.cr += e.cache_read;
+          sums.cr += e.cache_read;
           sums.cost += e.cost_usd;
           models[e.model] = (models[e.model] || 0) + 1;
         }
-        let primary = 'opus-4-6', max = 0;
+        let primary = 'kimi-k2-6', max = 0;
         for (const [m, c] of Object.entries(models)) if (c > max) { max = c; primary = m; }
         return {
           id: 'S' + String(i + 1).padStart(4, '0'),
@@ -850,7 +842,7 @@ function SessionsList({ synth, onOpen }) {
           durMin: (s.end - s.start) / 60000,
           reqs: s.events.length,
           cost: sums.cost,
-          total: sums.input + sums.output + sums.cc + sums.cr,
+          total: sums.input + sums.output + sums.cr,
           primary,
         };
       });

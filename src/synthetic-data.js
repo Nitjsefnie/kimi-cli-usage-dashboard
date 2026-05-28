@@ -79,11 +79,10 @@ window.generateSyntheticData = function () {
       const ramp = 0.3 + I * 1.5;
       const inputT  = Math.floor((20 + rng() * 80) * ramp);
       const outputT = Math.floor((300 + rng() * 1500) * ramp);
-      const ccT     = Math.floor((1000 + rng() * 6000) * ramp);
       const crT     = Math.floor((20000 + rng() * 120000) * ramp * (1 + frac * 4));
 
       const p = PRICING[model] || PRICING['opus-4-6'];
-      const cost = inputT * p.in + outputT * p.out + ccT * p.cc + crT * p.cr;
+      const cost = inputT * p.in + outputT * p.out + crT * p.cr;
 
       events.push({
         ts,
@@ -91,10 +90,7 @@ window.generateSyntheticData = function () {
         model,
         input_tokens: inputT,
         output_tokens: outputT,
-        cache_create: ccT,
         cache_read: crT,
-        ephemeral_5m: Math.floor(ccT * 0.7),
-        ephemeral_1h: Math.floor(ccT * 0.3),
         cost_usd: cost,
         is_api_error: 0,
       });

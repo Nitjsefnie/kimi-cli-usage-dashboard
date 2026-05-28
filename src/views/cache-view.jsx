@@ -1,7 +1,7 @@
-// Cache view — literal replica of parse_session.py --cache output.
+// Cache view — literal replica of parse_wire.py --cache output.
 // Three sections:
 //   1. PerModelTable: one row per model + a SESSION TOTAL row
-//   2. TopTurnsTable × 3 (output, cache_create, cache_read)
+//   2. TopTurnsTable × 2 (output, cache_read)
 //   3. CostBuckets: per-bucket cost with % + TOTAL + PER TURN
 //
 // Mounted by App.jsx as <window.CacheView project={...} range="30d" />.
@@ -33,21 +33,14 @@ window.CacheView = function CacheView({ project, range }) {
       <TopTurnsTable
         rows={data.top_output}
         cols={['ts', 'line', 'request_id', 'model', 'output',
-               'c_read', 'c_create_1h', 'c_create_5m', 'fresh', 'cost']}
-      />
-
-      <h2>TOP 10 TURNS BY CACHE CREATE</h2>
-      <TopTurnsTable
-        rows={data.top_cache_create}
-        cols={['ts', 'line', 'request_id', 'model', 'c_create',
-               'c_create_1h', 'c_create_5m', 'c_read', 'output', 'fresh', 'cost']}
+               'c_read', 'fresh', 'cost']}
       />
 
       <h2>TOP 10 TURNS BY CACHE READ</h2>
       <TopTurnsTable
         rows={data.top_cache_read}
         cols={['ts', 'line', 'request_id', 'model', 'c_read',
-               'c_create_1h', 'c_create_5m', 'output', 'fresh', 'cost']}
+               'output', 'fresh', 'cost']}
       />
 
       <h2>ESTIMATED API COST</h2>
@@ -73,11 +66,8 @@ function PerModelTable({ rows, sessionTotal }) {
           <th>model</th>
           <th>turns</th>
           <th>fresh</th>
-          <th>cache_create</th>
           <th>cache_read</th>
           <th>output</th>
-          <th>eph_5m</th>
-          <th>eph_1h</th>
           <th>hit_rate</th>
           <th>cost</th>
         </tr>
@@ -88,11 +78,8 @@ function PerModelTable({ rows, sessionTotal }) {
             <td>{r.model}</td>
             <td>{r.turns.toLocaleString()}</td>
             <td>{fmt(r.fresh)}</td>
-            <td>{fmt(r.cache_create)}</td>
             <td>{fmt(r.cache_read)}</td>
             <td>{fmt(r.output)}</td>
-            <td>{fmt(r.eph5)}</td>
-            <td>{fmt(r.eph1h)}</td>
             <td>{r.hit_rate_pct.toFixed(1)}%</td>
             <td>${r.cost_total.toFixed(2)}</td>
           </tr>
@@ -130,11 +117,9 @@ function formatCell(r, c) {
 }
 
 function CostBuckets({ buckets, total, turns }) {
-  const order = ['read', 'create_1h', 'create_5m', 'output', 'fresh'];
+  const order = ['read', 'output', 'fresh'];
   const labels = {
     read: 'Cache read',
-    create_1h: 'Cache create 1h',
-    create_5m: 'Cache create 5m',
     output: 'Output',
     fresh: 'Fresh input',
   };
