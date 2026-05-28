@@ -28,6 +28,13 @@ from backend import cache, db, pricing, r2
 router = APIRouter(prefix="/api")
 
 
+# Kimi-only ingest right now — parse.py:157 emits this for every record.
+# When kimi-dash starts ingesting other ecosystems (Claude jsonls, etc.)
+# the JOIN-by-line_num assumption breaks for those sources too; at that
+# point promote model to a `tool_uses.model` column populated at parse time.
+_ONLY_MODEL = "kimi-k2-6"
+
+
 @router.get("/me")
 async def me(request: Request) -> dict:
     """Identity probe — frontend uses `is_guest` to decide which UI
@@ -55,18 +62,16 @@ async def tool_usage(
     delta = _parse_range(range)
     since = datetime.now(timezone.utc) - delta
     bucket_s = _bucket_seconds(delta)
-    # Args must match the order parameters appear in the SQL string:
-    # model_join's LIKE first (it sits in the JOIN, before WHERE),
-    # then since (in WHERE), then project (after).
-    args: list[Any] = []
-    model_join = ""
-    if model:
-        model_join = (
-            "JOIN records r ON r.file_key = tu.file_key "
-            "AND r.line_num = tu.line_num AND r.model LIKE %s"
-        )
-        args.append(f"%{model}%")
-    args.append(since)
+    # Model filter: in Kimi, every record carries model='kimi-k2-6' (set
+    # unconditionally in parse.py at parse time). Joining `records` to filter
+    # by model is BROKEN here because tool_uses.line_num != records.line_num
+    # in Kimi wire.jsonl (tool_uses live on ToolCall lines, records on
+    # StatusUpdate lines — disjoint sets). Apply the model filter in Python:
+    # if the requested substring matches the only model we ingest, pass; else
+    # short-circuit to an empty result.
+    if model and model not in _ONLY_MODEL:
+        return {"range": range, "project": project, "bucket_s": bucket_s, "buckets": []}
+    args: list[Any] = [since]
     proj_filter = ""
     if project:
         proj_filter = "AND f.project_id = %s"
@@ -82,7 +87,6 @@ async def tool_usage(
                    COUNT(*)     AS n
             FROM tool_uses tu
             JOIN files f ON f.file_key = tu.file_key
-            {model_join}
             WHERE tu.ts >= %s {proj_filter}
             GROUP BY 1, 2
             ORDER BY 1, 2
@@ -118,17 +122,18 @@ async def tool_error_rate(
     delta = _parse_range(range)
     since = datetime.now(timezone.utc) - delta
     bucket_s = _bucket_seconds(delta)
-    # Args appended in the order placeholders appear in the SQL string:
-    # tu.ts >= %s, then f.project_id, then r.model.
+    # See tool_usage above for why the records JOIN is wrong for Kimi data
+    # (tool_uses.line_num lives on ToolCall lines, records.line_num on
+    # StatusUpdate lines — they're disjoint, so the JOIN produces zero rows
+    # and the frontend sees an empty result). Hardcode the only model the
+    # current parser emits and apply the filter in Python.
+    if model and model not in _ONLY_MODEL:
+        return {"range": range, "project": project, "bucket_s": bucket_s, "buckets": []}
     args: list[Any] = [since]
     proj_filter = ""
     if project:
         proj_filter = "AND f.project_id = %s"
         args.append(project)
-    model_filter = ""
-    if model:
-        model_filter = "AND r.model LIKE %s"
-        args.append(f"%{model}%")
 
     with db.viz_conn() as c:
         rows = c.execute(
@@ -136,21 +141,19 @@ async def tool_error_rate(
             SELECT to_timestamp(
                      floor(EXTRACT(EPOCH FROM tu.ts) / {bucket_s}) * {bucket_s} + {bucket_s} / 2
                    ) AS bucket,
-                   r.model      AS model,
+                   %s           AS model,
                    tu.tool_name AS tool,
                    COUNT(*)                              AS n_total,
                    COUNT(*) FILTER (WHERE tu.is_error)   AS n_error
             FROM tool_uses tu
-            JOIN records r ON r.file_key = tu.file_key AND r.line_num = tu.line_num
             JOIN files   f ON f.file_key = tu.file_key
             WHERE tu.is_error IS NOT NULL
               AND tu.ts >= %s
               {proj_filter}
-              {model_filter}
-            GROUP BY 1, 2, 3
-            ORDER BY 1, 2, 3
+            GROUP BY 1, 3
+            ORDER BY 1, 3
             """,
-            args,
+            [_ONLY_MODEL, *args],
         ).fetchall()
 
     return {
@@ -432,22 +435,23 @@ async def cache_view(
     project: str | None = Query(None),
     model: str | None = Query(None),
 ) -> dict:
-    """Literal replica of parse_session.py --cache output.
+    """Literal replica of parse_wire.py --cache output.
 
     Returns:
       {
         range, project,
-        per_model: [{model, turns, fresh, cache_create, cache_read, output,
+        per_model: [{model, turns, fresh, cache_read, output,
                      hit_rate_pct, cost_total, cost_buckets}],
         session_total: {same shape, summed across per_model},
-        top_output: [{ts, line, model, output, c_read,
-                      c_create, fresh, cost, file_key}],
-        top_cache_create: [...],
-        top_cache_read:   [...]
+        top_output: [{ts, line, model, output, c_read, fresh, cost, file_key}],
+        top_cache_read: [...]
       }
 
     Cross-file uuid dedup via DISTINCT ON (uuid) at query time. Records
     with NULL uuid (legacy) are kept verbatim (UNION ALL leg).
+
+    Kimi wire format never emits input_cache_creation > 0, so cache_create /
+    create buckets are dropped from the response entirely.
     """
     delta = _parse_range(range)
     since = datetime.now(timezone.utc) - delta
@@ -484,7 +488,6 @@ async def cache_view(
             SELECT model,
                    COUNT(*)                    AS turns,
                    SUM(fresh_tokens)           AS fresh,
-                   SUM(cache_creation_tokens)  AS cache_create,
                    SUM(cache_read_tokens)      AS cache_read,
                    SUM(output_tokens)          AS output,
                    SUM(cost_usd)               AS cost_total
@@ -499,24 +502,9 @@ async def cache_view(
             base_cte + """
             SELECT ts, line_num, model,
                    output_tokens, cache_read_tokens,
-                   cache_creation_tokens, fresh_tokens,
-                   cost_usd, file_key
+                   fresh_tokens, cost_usd, file_key
             FROM deduped
             ORDER BY output_tokens DESC
-            LIMIT 10
-            """,
-            args2,
-        ).fetchall()
-
-        top_create = c.execute(
-            base_cte + """
-            SELECT ts, line_num, model,
-                   cache_creation_tokens,
-                   cache_read_tokens, output_tokens, fresh_tokens,
-                   cost_usd, file_key
-            FROM deduped
-            WHERE cache_creation_tokens > 0
-            ORDER BY cache_creation_tokens DESC
             LIMIT 10
             """,
             args2,
@@ -537,29 +525,25 @@ async def cache_view(
         ).fetchall()
 
     def _per_model(row):
-        model, turns, fresh, cc, cr, output, cost = row
+        model, turns, fresh, cr, output, cost = row
         fresh = int(fresh or 0)
-        cc = int(cc or 0)
         cr = int(cr or 0)
         output = int(output or 0)
         rates = pricing.rate_for(model)
         f_cost = fresh * rates["fresh"] / 1_000_000
-        c_cost = cc * rates["create"] / 1_000_000
         rd_cost = cr * rates["read"] / 1_000_000
         o_cost = output * rates["output"] / 1_000_000
-        total_in = fresh + cc + cr
+        total_in = fresh + cr
         return {
             "model": model,
             "turns": int(turns or 0),
             "fresh": fresh,
-            "cache_create": cc,
             "cache_read": cr,
             "output": output,
             "hit_rate_pct": round((cr / total_in * 100.0) if total_in else 0.0, 1),
             "cost_total": round(float(cost or 0), 4),
             "cost_buckets": {
                 "fresh": round(f_cost, 4),
-                "create": round(c_cost, 4),
                 "read": round(rd_cost, 4),
                 "output": round(o_cost, 4),
             },
@@ -570,20 +554,15 @@ async def cache_view(
     session_total = {
         "turns": sum(m["turns"] for m in per_model),
         "fresh": sum(m["fresh"] for m in per_model),
-        "cache_create": sum(m["cache_create"] for m in per_model),
         "cache_read": sum(m["cache_read"] for m in per_model),
         "output": sum(m["output"] for m in per_model),
         "cost_total": round(sum(m["cost_total"] for m in per_model), 4),
         "cost_buckets": {
             k: round(sum(m["cost_buckets"][k] for m in per_model), 4)
-            for k in ("fresh", "create", "read", "output")
+            for k in ("fresh", "read", "output")
         },
     }
-    total_in = (
-        session_total["fresh"]
-        + session_total["cache_create"]
-        + session_total["cache_read"]
-    )
+    total_in = session_total["fresh"] + session_total["cache_read"]
     session_total["hit_rate_pct"] = round(
         (session_total["cache_read"] / total_in * 100.0) if total_in else 0.0, 1
     )
@@ -611,18 +590,12 @@ async def cache_view(
         "session_total": session_total,
         "top_output": _top_rows(top_output, [
             "ts", "line", "model",
-            "output", "c_read", "c_create", "fresh",
+            "output", "c_read", "fresh",
             "cost", "file_key",
-        ]),
-        "top_cache_create": _top_rows(top_create, [
-            "ts", "line", "model",
-            "c_create", "c_read",
-            "output", "fresh", "cost", "file_key",
         ]),
         "top_cache_read": _top_rows(top_read, [
             "ts", "line", "model",
-            "c_read", "c_create",
-            "output", "fresh", "cost", "file_key",
+            "c_read", "output", "fresh", "cost", "file_key",
         ]),
     }
 
@@ -836,7 +809,7 @@ async def dashboard(
     WITH deduped AS (
       (SELECT DISTINCT ON (r.uuid)
          r.file_key, r.line_num, r.uuid, r.ts, r.model,
-         r.fresh_tokens, r.cache_creation_tokens, r.cache_read_tokens,
+         r.fresh_tokens, r.cache_read_tokens,
          r.output_tokens, r.cost_usd,
          r.text_chars
        FROM records r
@@ -845,7 +818,7 @@ async def dashboard(
        ORDER BY r.uuid, r.file_key)
       UNION ALL
       (SELECT r.file_key, r.line_num, r.uuid, r.ts, r.model,
-              r.fresh_tokens, r.cache_creation_tokens, r.cache_read_tokens,
+              r.fresh_tokens, r.cache_read_tokens,
               r.output_tokens, r.cost_usd,
               r.text_chars
        FROM records r
@@ -863,7 +836,6 @@ async def dashboard(
                    COALESCE(NULLIF(d.model, ''), 'unknown') AS model,
                    SUM(d.fresh_tokens)     AS input_tokens,
                    SUM(d.output_tokens)    AS output_tokens,
-                   SUM(d.cache_creation_tokens) AS cache_create_tokens,
                    SUM(d.cache_read_tokens) AS cache_read_tokens,
                    SUM(d.cost_usd)         AS cost_usd,
                    COUNT(*)                AS requests,
@@ -937,7 +909,6 @@ async def dashboard(
                    COUNT(*) AS requests,
                    SUM(d.fresh_tokens) AS input_tokens,
                    SUM(d.output_tokens) AS output_tokens,
-                   SUM(d.cache_creation_tokens) AS cache_create_tokens,
                    SUM(d.cache_read_tokens) AS cache_read_tokens,
                    SUM(d.cost_usd) AS cost_usd,
                    COALESCE(
@@ -1048,7 +1019,7 @@ async def dashboard(
             f"""
             WITH per_session AS (
               SELECT f.session_id, f.file_key,
-                     SUM(r.fresh_tokens + r.cache_creation_tokens) AS write_tokens,
+                     SUM(r.fresh_tokens) AS write_tokens,
                      EXTRACT(EPOCH FROM (max(r.ts) - min(r.ts))) AS span_s
               FROM files f
               JOIN records r ON r.file_key = f.file_key
@@ -1104,7 +1075,7 @@ async def dashboard(
     hourly = []
     seen_hours: set[str | None] = set()
     for row in hourly_rows:
-        (hour, model, input_t, output_t, cc, cr, cost, reqs, sc) = row
+        (hour, model, input_t, output_t, cr, cost, reqs, sc) = row
         hour_iso = _iso(hour)
         is_first_for_hour = hour_iso not in seen_hours
         seen_hours.add(hour_iso)
@@ -1113,7 +1084,6 @@ async def dashboard(
             "model": model or "unknown",
             "input_tokens": int(input_t or 0),
             "output_tokens": int(output_t or 0),
-            "cache_create_tokens": int(cc or 0),
             "cache_read_tokens": int(cr or 0),
             "cost_usd": float(cost or 0),
             "requests": int(reqs or 0),
@@ -1162,9 +1132,9 @@ async def dashboard(
     ctx_turns_by_session = {sid: turns for (sid, turns) in ctx_turns_rows}
     sessions_out = []
     for row in sessions_rows:
-        (sid, st, et, reqs, inp, out, cc, cr, cost, dom, models_used) = row
+        (sid, st, et, reqs, inp, out, cr, cost, dom, models_used) = row
         raw_turns = ctx_turns_by_session.get(sid) or []
-        # Project to {t, ctx} (input is total ctx-window: input+cc+cr).
+        # Project to {t, ctx} (input is total ctx-window: input + cache_read).
         turns_proj = [
             {"t": i, "ctx": int(t.get("input", 0) or 0)}
             for i, t in enumerate(raw_turns)
@@ -1181,7 +1151,6 @@ async def dashboard(
             "requests": int(reqs or 0),
             "input_tokens": int(inp or 0),
             "output_tokens": int(out or 0),
-            "cache_create_tokens": int(cc or 0),
             "cache_read_tokens": int(cr or 0),
             "cost_usd": float(cost or 0),
             "model": dom or "",
@@ -1247,7 +1216,7 @@ def _aggregate_session_row(row) -> dict:
     """Shared row-builder for /api/sessions and /api/sessions/{id}."""
     (
         session_id, project_id, first_at, last_at, dur_s, req_count,
-        input_t, output_t, cc, cr, cost, models_raw,
+        input_t, output_t, cr, cost, models_raw,
     ) = row
     models = {}
     if models_raw:
@@ -1266,7 +1235,6 @@ def _aggregate_session_row(row) -> dict:
         "request_count": int(req_count or 0),
         "input_tokens": int(input_t or 0),
         "output_tokens": int(output_t or 0),
-        "cache_create_tokens": int(cc or 0),
         "cache_read_tokens": int(cr or 0),
         "cost_usd": float(cost or 0),
         "models": models,
@@ -1313,15 +1281,15 @@ async def list_sessions(
     WITH deduped AS (
       (SELECT DISTINCT ON (r.uuid)
          r.file_key, r.uuid, r.ts, r.model,
-         r.fresh_tokens, r.cache_creation_tokens,
-         r.cache_read_tokens, r.output_tokens, r.cost_usd
+         r.fresh_tokens, r.cache_read_tokens,
+         r.output_tokens, r.cost_usd
        FROM records r JOIN files f ON f.file_key = r.file_key
        WHERE r.uuid IS NOT NULL {proj_filter}
        ORDER BY r.uuid, r.file_key)
       UNION ALL
       (SELECT r.file_key, r.uuid, r.ts, r.model,
-              r.fresh_tokens, r.cache_creation_tokens,
-              r.cache_read_tokens, r.output_tokens, r.cost_usd
+              r.fresh_tokens, r.cache_read_tokens,
+              r.output_tokens, r.cost_usd
        FROM records r JOIN files f ON f.file_key = r.file_key
        WHERE r.uuid IS NULL {proj_filter})
     ),
@@ -1334,7 +1302,6 @@ async def list_sessions(
              COUNT(*) AS request_count,
              SUM(d.fresh_tokens)         AS input_tokens,
              SUM(d.output_tokens)        AS output_tokens,
-             SUM(d.cache_creation_tokens) AS cache_creation_tokens,
              SUM(d.cache_read_tokens)    AS cache_read_tokens,
              SUM(d.cost_usd)             AS cost_usd,
              (SELECT json_agg(json_build_object('model', model, 'count', c))
@@ -1392,7 +1359,6 @@ async def session_detail(session_id: str) -> dict:
                      COUNT(*) AS request_count,
                      SUM(r.fresh_tokens)         AS input_tokens,
                      SUM(r.output_tokens)        AS output_tokens,
-                     SUM(r.cache_creation_tokens) AS cache_creation_tokens,
                      SUM(r.cache_read_tokens)    AS cache_read_tokens,
                      SUM(r.cost_usd)             AS cost_usd,
                      (SELECT json_agg(json_build_object('model', model, 'count', c))
@@ -1423,13 +1389,13 @@ async def session_detail(session_id: str) -> dict:
     (
         sid, project_id, file_key, ctx_turns,
         first_at, last_at, dur_s, req_count,
-        input_t, output_t, cc, cr, cost,
+        input_t, output_t, cr, cost,
         models_raw, dom_model,
     ) = row
 
     base = _aggregate_session_row((
         sid, project_id, first_at, last_at, dur_s, req_count,
-        input_t, output_t, cc, cr, cost, models_raw,
+        input_t, output_t, cr, cost, models_raw,
     ))
 
     # ctx_trace from ctx_turns (already canonical [{idx,ts,line,input,output,delta}])
@@ -1450,10 +1416,7 @@ async def session_detail(session_id: str) -> dict:
         ctx_trace.append({"t": t_epoch, "ctx": ctx_val})
 
     # Burn (tps + dominant model) for this session.
-    write_tokens = (
-        base["input_tokens"]
-        + base.get("cache_create_tokens", 0)
-    )
+    write_tokens = base["input_tokens"]
     span_s = max(base["duration_s"], 1)
     burn = {
         "tps": float(write_tokens) / span_s,
