@@ -52,30 +52,46 @@ def run_ingest(trigger: str) -> dict:
                 ).fetchall()
             }
 
+        # Pre-walk R2 once to (a) collect wire.jsonl keys and (b) fetch every
+        # sessions/<HASH>/project.json marker. The marker is published by
+        # archive_sessions.py on the originating box and carries the path
+        # the session was run from — we use it as the project's display_name.
+        wire_objs: list = []
+        project_paths: dict[str, str] = {}
+        for obj in r2.list_keys():
+            parts = obj.key.split("/")
+            if len(parts) >= 4 and parts[0] == "sessions" \
+                    and parts[-1] == "wire.jsonl" and obj.key.endswith(".jsonl"):
+                wire_objs.append(obj)
+            elif len(parts) == 3 and parts[0] == "sessions" \
+                    and parts[2] == "project.json":
+                try:
+                    blob = r2.get_object(obj.key)
+                    data = json.loads(blob.decode("utf-8"))
+                    path = data.get("path")
+                    if isinstance(path, str) and path:
+                        project_paths[parts[1]] = path
+                except (OSError, ValueError, KeyError, json.JSONDecodeError):
+                    pass
+
         seen_keys: set[str] = set()
         seen_projects: dict[str, dict] = {}
 
-        for obj in r2.list_keys():
-            if not obj.key.endswith(".jsonl"):
-                continue
+        for obj in wire_objs:
             parts = obj.key.split("/")
-            # Expect: sessions/{session_hash}/{uuid}/wire.jsonl
-            if len(parts) < 4:
-                continue
-            if parts[0] != "sessions":
-                continue
-            fname = parts[-1]
-            if fname != "wire.jsonl":
-                continue
             project_id = parts[1]
             session_id = parts[2]
-            is_main = True
+            # Subagent transcripts live at .../subagents/<sub-id>/wire.jsonl;
+            # main session transcripts at .../<uuid>/wire.jsonl. Both get
+            # ingested, but the classification drives the main/subagent
+            # split surfaced by /api/dashboard.
+            is_main = "/subagents/" not in obj.key
             listed += 1
             seen_keys.add(obj.key)
 
             proj = seen_projects.setdefault(project_id, {
                 "project_id": project_id,
-                "display_name": project_id,
+                "display_name": project_paths.get(project_id, project_id),
                 "first_seen_at": obj.last_modified,
                 "last_seen_at": obj.last_modified,
             })
@@ -187,6 +203,27 @@ def run_ingest(trigger: str) -> dict:
                 inserted += 1
             else:
                 reparsed += 1
+
+        # Unconditional project upsert — even when no files needed reparse,
+        # the project marker's path may have changed (e.g. user renamed a
+        # work_dir), and the per-file inner block above runs only on reparse.
+        # Pushing every seen project here keeps display_name fresh.
+        if seen_projects:
+            with db.viz_conn() as c, c.cursor() as cur:
+                cur.executemany(
+                    "INSERT INTO projects (project_id, display_name, "
+                    "first_seen_at, last_seen_at) "
+                    "VALUES (%(project_id)s, %(display_name)s, "
+                    "%(first_seen_at)s, %(last_seen_at)s) "
+                    "ON CONFLICT (project_id) DO UPDATE SET "
+                    "  display_name = EXCLUDED.display_name, "
+                    "  first_seen_at = LEAST(projects.first_seen_at, "
+                    "                        EXCLUDED.first_seen_at), "
+                    "  last_seen_at = GREATEST(projects.last_seen_at, "
+                    "                          EXCLUDED.last_seen_at)",
+                    list(seen_projects.values()),
+                )
+                c.commit()
 
         # Orphan files
         with db.viz_conn() as c, c.cursor() as cur:
