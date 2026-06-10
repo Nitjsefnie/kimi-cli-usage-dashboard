@@ -1,1 +1,0 @@
-/root/.kimi/scripts/parse_wire.py

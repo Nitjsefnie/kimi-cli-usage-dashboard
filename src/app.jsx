@@ -2,23 +2,16 @@
 // Loads synthetic events for the dashboard preview; lets you drop a real
 // .jsonl on the Session view to inspect a single transcript.
 
-const { useState, useEffect, useMemo, useRef, useCallback } = React;
-
-const SAMPLE_KEY = 'cc_viz_synthetic';
+const { useState, useEffect, useMemo, useRef } = React;
 
 function txToDashData(tx) {
   // Convert a real transcript into dashboard-shaped {events, limitHits, range}.
   // Each event = ONE assistant turn (after applying the parse_session
   // turn-stats algorithm: user-text boundaries → last usage per turn).
-  const RATES = {
-    'kimi': { in: 0.95/1e6, out: 4.00/1e6, create: 0.00/1e6, read: 0.16/1e6 },
-  };
-  function rateFor(model) {
-    return RATES.kimi;
-  }
-  function shortM(model) {
-    return model || 'kimi';
-  }
+  // Rates come from the shared window.rateForModel table (parser.js) so
+  // the Inspector and this path can never disagree on pricing.
+  const rateFor = window.rateForModel;
+  const shortM = (model) => window.shortModelName(model || 'kimi');
 
   // Group all assistant_usage records by sessionId, plus user-text events
   // per session for turn boundaries (only available when loaded via Load N).
@@ -88,7 +81,7 @@ function txToDashData(tx) {
       const cr  = us.cache_read_input_tokens || 0;
       if ((inp + cr) === 0) continue; // refusal/interrupt
       const r = rateFor(u.model);
-      const cost = inp * r.in + out * r.out + cr * r.read;
+      const cost = (inp * r.fresh + out * r.out + cr * r.read) / 1_000_000;
       events.push({
         ts: t,
         session_id: sid,
@@ -314,7 +307,7 @@ function App() {
 
   return (
     <div className="app-root">
-      <TopBar route={route} setRoute={setRoute} isGuest={isGuest} />
+      <TopBar route={route} setRoute={setRoute} isGuest={isGuest} backendOn={backendOn} />
       {backendOn && !isGuest && projects && (
         <ProjectPicker
           projects={projects}
@@ -332,44 +325,13 @@ function App() {
           onOpen={(sid) => backendOn ? loadFromBackend(sid) : setRoute('session')}
         />
       )}
-      {route === 'session' && <SessionView tx={tx} loadFile={loadFile} />}
-    </div>
-  );
-}
-
-function ModelPicker({ models, active, onChange }) {
-  // Dedup by short name (claude-opus-4-7-20251101 → opus-4-7), sum
-  // counts. Lets a single "opus-4-7" choice cover both date-suffixed
-  // and bare model strings via the backend's LIKE %model% filter.
-  const grouped = {};
-  for (const m of models || []) {
-    const key = window.shortModelName ? window.shortModelName(m.model) : m.model;
-    if (key === '<synthetic>' || key === 'synthetic') continue;
-    grouped[key] = (grouped[key] || 0) + (m.n || 0);
-  }
-  const opts = Object.entries(grouped)
-    .sort((a, b) => b[1] - a[1])
-    .map(([k, n]) => ({ key: k, n }));
-  return (
-    <div className="project-picker" style={{ borderTop: '1px solid #2a2a4a' }}>
-      <span style={{ color: '#9090b0', fontFamily: 'monospace', fontSize: 11, marginRight: 8 }}>model:</span>
-      <select
-        value={active}
-        onChange={e => onChange(e.target.value)}
-        style={{
-          background: '#16172e', color: '#e6e8f0',
-          border: '1px solid #2a2c44', borderRadius: 4,
-          padding: '4px 8px', fontFamily: 'monospace', fontSize: 12,
-          cursor: 'pointer',
-        }}
-      >
-        <option value="">All ({Object.values(grouped).reduce((s, n) => s + n, 0).toLocaleString()})</option>
-        {opts.map(o => (
-          <option key={o.key} value={o.key}>
-            {o.key} ({o.n.toLocaleString()})
-          </option>
-        ))}
-      </select>
+      {route === 'cache' && backendOn && (
+        <div>
+          <window.CacheView project={activeProject} range={activeRange} />
+          <window.ContextGrowthAgg project={activeProject} range={activeRange} />
+        </div>
+      )}
+      {route === 'session' && <SessionView tx={tx} loadFile={loadFile} loadFiles={loadFiles} />}
     </div>
   );
 }
@@ -419,11 +381,14 @@ function ProjectPicker({ projects, active, onChange }) {
 // panels render correctly. Per-turn detail is loaded separately via the
 // Inspector when a user opens a session.
 function backendDashToShape(b) {
+  // Canonicalize raw backend model strings once, so every downstream
+  // consumer (model colors, Cost by Model labels, burn-rate dots) agrees.
+  const short = m => window.shortModelName(m || 'unknown');
   const events = (b.hourly || []).map((h, i) => ({
     ts: Date.parse(h.hour),
     session_id: 'backend-h' + i,
     turn_index: 0,
-    model: h.model || 'unknown',
+    model: short(h.model),
     input_tokens: h.input_tokens,
     output_tokens: h.output_tokens,
     cache_read: h.cache_read_tokens,
@@ -433,7 +398,8 @@ function backendDashToShape(b) {
   })).filter(e => !isNaN(e.ts));
   if (!events.length) return null;
   const costByModel = (b.cost_by_model || []).reduce((acc, r) => {
-    acc[r.model] = (acc[r.model] || 0) + (r.cost_usd || 0);
+    const key = short(r.model);
+    acc[key] = (acc[key] || 0) + (r.cost_usd || 0);
     return acc;
   }, {});
   const limitHits = (b.rate_limit_hits || [])
@@ -446,7 +412,7 @@ function backendDashToShape(b) {
       ts: startMs,
       session_id: s.session_id,
       turn_index: 0,
-      model: s.model || 'unknown',
+      model: short(s.model),
       input_tokens: s.input_tokens,
       output_tokens: s.output_tokens,
       cache_read: s.cache_read_tokens,
@@ -460,8 +426,8 @@ function backendDashToShape(b) {
       ctxEnd: s.ctx_at_end != null ? s.ctx_at_end : null,
       session_id: s.session_id,
       requests: s.requests,
-      model: s.model || 'unknown',
-      models_used: s.models_used || [],
+      model: short(s.model),
+      models_used: (s.models_used || []).map(short),
       turns: s.turns || [],
     };
   });
@@ -485,13 +451,13 @@ function backendDashToShape(b) {
   };
 }
 
-function TopBar({ route, setRoute, isGuest }) {
+function TopBar({ route, setRoute, isGuest, backendOn }) {
   return (
     <header className="topbar">
       <div className="topbar-left">
         <div className="logo">
           <span className="logo-mark">{'>'}</span>
-          <span className="logo-text">CCUSAGE</span>
+          <span className="logo-text">KIMI-DASH</span>
           <span className="logo-sub">session inspector{isGuest ? ' · guest' : ''}</span>
         </div>
       </div>
@@ -499,6 +465,9 @@ function TopBar({ route, setRoute, isGuest }) {
         <button className={'navbtn ' + (route === 'dashboard' ? 'on' : '')} onClick={() => setRoute('dashboard')}>Overview</button>
         {!isGuest && (
           <button className={'navbtn ' + (route === 'sessions' ? 'on' : '')} onClick={() => setRoute('sessions')}>Sessions</button>
+        )}
+        {backendOn && (
+          <button className={'navbtn ' + (route === 'cache' ? 'on' : '')} onClick={() => setRoute('cache')}>Cache</button>
         )}
         {!isGuest && (
           <button className={'navbtn ' + (route === 'session' ? 'on' : '')} onClick={() => setRoute('session')}>Inspector</button>
@@ -573,11 +542,6 @@ function Dashboard({ synth, dataLabel, models, backendOn, activeProject, activeR
     if (span / b < MIN_BINS) break;
     binMs = b;
   }
-  function binLabel(ms) {
-    if (ms < 3600_000) return (ms/60_000) + 'm';
-    if (ms < 24*3600_000) return (ms/3600_000) + 'h';
-    return (ms/(24*3600_000)) + 'd';
-  }
 
   // Per-token-type cost — sum tokens × per-model rate over hourly
   // events using the shared rate table from parser.js. Lets the Token
@@ -613,6 +577,7 @@ function Dashboard({ synth, dataLabel, models, backendOn, activeProject, activeR
 
   return (
     <div className="dashboard">
+      <div className="muted" style={{ padding: '0 2px' }}>data: {dataLabel}</div>
       <div className="dash-summary">
         <Stat label="window" value={`${window.fmtDate(range.start, {day:true})} – ${window.fmtDate(range.end, {day:true})}`} />
         <Stat label="main sessions with usage" value={(mainWUsage != null ? mainWUsage : (totalSessions != null ? totalSessions : (events.reduce((s, e) => s + (e.session_count || 0), 0) || sessions.length))).toLocaleString()} />
@@ -708,79 +673,6 @@ function Dashboard({ synth, dataLabel, models, backendOn, activeProject, activeR
           windowBoundaries={windowBoundaries} />
       </div>
 
-    </div>
-  );
-}
-
-// Small-multiples token breakdown — replaces an HBar where Cache Read
-// (typically 98%+ of tokens) made every other row visually invisible.
-// Each cell: color stripe, type label, big tokens value with %, cost
-// with %. Sorted by cost (the question the reader actually has).
-function TokenBreakdownPanel({ rows, tokenTotal, costTotal }) {
-  return (
-    <div style={{
-      background: '#16213e',
-      border: '1px solid #2a2a4a',
-      borderRadius: 4,
-      padding: '14px 16px 16px',
-    }}>
-      <div style={{
-        textAlign: 'center', color: '#e0e0e0',
-        fontFamily: 'monospace', fontSize: 13, fontWeight: 700,
-        marginBottom: 12,
-      }}>Token Breakdown</div>
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
-        gap: 10,
-      }}>
-        {rows.map((r) => {
-          const tokPct  = (r.value / tokenTotal * 100);
-          const costPct = (r.cost  / costTotal  * 100);
-          return (
-            <div key={r.label} style={{
-              background: '#0f1428',
-              borderLeft: `3px solid ${r.color}`,
-              borderRadius: 2,
-              padding: '8px 12px',
-            }}>
-              <div style={{
-                color: r.color, fontFamily: 'monospace',
-                fontSize: 10.5, fontWeight: 700,
-                letterSpacing: 0.5, marginBottom: 6,
-                whiteSpace: 'nowrap', overflow: 'hidden',
-                textOverflow: 'ellipsis',
-              }}>{r.label}</div>
-              <div style={{
-                display: 'flex', justifyContent: 'space-between',
-                alignItems: 'baseline', gap: 8,
-              }}>
-                <span style={{
-                  fontFamily: 'monospace', fontSize: 16,
-                  fontWeight: 600, color: '#e0e0e0',
-                }}>{window.humanFmt(r.value)}</span>
-                <span style={{
-                  fontFamily: 'monospace', fontSize: 10,
-                  color: '#7e84a3',
-                }}>{tokPct.toFixed(1)}%</span>
-              </div>
-              <div style={{
-                display: 'flex', justifyContent: 'space-between',
-                alignItems: 'baseline', gap: 8, marginTop: 2,
-              }}>
-                <span style={{
-                  fontFamily: 'monospace', fontSize: 13,
-                  fontWeight: 600, color: '#ffdd00',
-                }}>{window.humanCurrency(r.cost)}</span>
-                <span style={{
-                  fontFamily: 'monospace', fontSize: 10,
-                  color: '#7e84a3',
-                }}>{costPct.toFixed(1)}%</span>
-              </div>
-            </div>
-          );
-        })}
-      </div>
     </div>
   );
 }
@@ -897,12 +789,12 @@ function SessionsList({ synth, onOpen }) {
 // Session view
 // ─────────────────────────────────────────────────────────────────
 
-function SessionView({ tx, loadFile }) {
+function SessionView({ tx, loadFile, loadFiles }) {
   const [selected, setSelected] = useState(0);
   const [filter, setFilter] = useState({ user: true, asst: true, think: true, tool: true, result: true });
   const [search, setSearch] = useState('');
   const [dense, setDense] = useState(false);
-  const [showThinking, setShowThinking] = useState(true);
+  const [view, setView] = useState('timeline'); // timeline | ctx
   const dropRef = useRef(null);
 
   useEffect(() => {
@@ -911,7 +803,13 @@ function SessionView({ tx, loadFile }) {
     const leave = () => el.classList.remove('drag');
     const drop = e => {
       e.preventDefault(); el.classList.remove('drag');
-      if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]);
+      const files = e.dataTransfer.files;
+      if (!files || !files.length) return;
+      const isZip = files[0].name.toLowerCase().endsWith('.zip');
+      // Single transcript → inspector; several files or a zip → the
+      // multi-file merge path (cross-file uuid dedup → dashboard).
+      if (files.length === 1 && !isZip) loadFile(files[0]);
+      else loadFiles(files);
     };
     el.addEventListener('dragover', over);
     el.addEventListener('dragleave', leave);
@@ -928,10 +826,10 @@ function SessionView({ tx, loadFile }) {
       <div className="session-empty" ref={dropRef}>
         <div className="drop-card">
           <div className="drop-glyph">⬇</div>
-          <div className="drop-title">Drop a .jsonl transcript here</div>
-          <div className="drop-sub">Or use the <em>Load .jsonl</em> button up top. Files are parsed in your browser — nothing leaves the page.</div>
+          <div className="drop-title">Drop a wire.jsonl transcript here</div>
+          <div className="drop-sub">Drop several files (or a .zip of transcripts) to merge them into the dashboard. Files are parsed in your browser — nothing leaves the page.</div>
           <div className="drop-hints">
-            <span>~/.claude/projects/&lt;hash&gt;/&lt;session-uuid&gt;.jsonl</span>
+            <span>~/.kimi/sessions/&lt;hash&gt;/&lt;session-uuid&gt;/wire.jsonl</span>
           </div>
         </div>
       </div>
@@ -941,7 +839,7 @@ function SessionView({ tx, loadFile }) {
   const visible = tx.events.filter(e => {
     if (e.type === 'user_message' && !filter.user) return false;
     if (e.type === 'assistant_text' && !filter.asst) return false;
-    if (e.type === 'thinking' && (!filter.think || !showThinking)) return false;
+    if (e.type === 'thinking' && !filter.think) return false;
     if ((e.type === 'tool_call' || e.type === 'agent_spawn') && !filter.tool) return false;
     if (e.type === 'tool_result' && !filter.result) return false;
     if (search) {
@@ -956,6 +854,18 @@ function SessionView({ tx, loadFile }) {
   return (
     <div className="session-view">
       <SessionHeader stats={tx.stats} />
+      <div style={{
+        display: 'flex', gap: 6, alignItems: 'center',
+        padding: '8px 14px', borderBottom: '1px solid var(--border)',
+        background: 'var(--bg-soft)',
+      }}>
+        {[['timeline', 'Timeline'], ['ctx', 'Context growth']].map(([k, lab]) => (
+          <button key={k} className={'fchip ' + (view === k ? 'on' : '')}
+            onClick={() => setView(k)}>{lab}</button>
+        ))}
+      </div>
+      {view === 'ctx' && <window.ContextGrowthView tx={tx} />}
+      {view === 'timeline' && (
       <div className="session-body">
         <aside className="session-side">
           <div className="filterbar">
@@ -982,6 +892,7 @@ function SessionView({ tx, loadFile }) {
           <window.EventDetail event={sel} dense={dense} />
         </main>
       </div>
+      )}
     </div>
   );
 }
