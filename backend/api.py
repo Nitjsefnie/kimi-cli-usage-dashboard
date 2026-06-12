@@ -28,11 +28,11 @@ from backend import cache, db, pricing, r2
 router = APIRouter(prefix="/api")
 
 
-# Kimi-only ingest right now — parse.py:157 emits this for every record.
+# Kimi-only ingest right now — parse.py emits one of these for every record.
 # When kimi-dash starts ingesting other ecosystems (Claude jsonls, etc.)
 # the JOIN-by-line_num assumption breaks for those sources too; at that
 # point promote model to a `tool_uses.model` column populated at parse time.
-_ONLY_MODEL = "kimi-k2-6"
+_ONLY_MODELS = ("kimi-k2-6", "kimi-k2-7-code")
 
 
 @router.get("/me")
@@ -62,14 +62,14 @@ async def tool_usage(
     delta = _parse_range(range)
     since = datetime.now(timezone.utc) - delta
     bucket_s = _bucket_seconds(delta)
-    # Model filter: in Kimi, every record carries model='kimi-k2-6' (set
-    # unconditionally in parse.py at parse time). Joining `records` to filter
-    # by model is BROKEN here because tool_uses.line_num != records.line_num
-    # in Kimi wire.jsonl (tool_uses live on ToolCall lines, records on
-    # StatusUpdate lines — disjoint sets). Apply the model filter in Python:
-    # if the requested substring matches the only model we ingest, pass; else
-    # short-circuit to an empty result.
-    if model and model not in _ONLY_MODEL:
+    # Model filter: in Kimi, every record carries model='kimi-k2-6' or
+    # 'kimi-k2-7-code' (assigned by first-event timestamp in parse.py).
+    # Joining `records` to filter by model is BROKEN here because
+    # tool_uses.line_num != records.line_num in Kimi wire.jsonl (tool_uses
+    # live on ToolCall lines, records on StatusUpdate lines — disjoint sets).
+    # Apply the model filter in Python: if the requested substring matches a
+    # model we ingest, pass; else short-circuit to an empty result.
+    if model and not any(m in model for m in _ONLY_MODELS):
         return {"range": range, "project": project, "bucket_s": bucket_s, "buckets": []}
     args: list[Any] = [since]
     proj_filter = ""
@@ -125,9 +125,9 @@ async def tool_error_rate(
     # See tool_usage above for why the records JOIN is wrong for Kimi data
     # (tool_uses.line_num lives on ToolCall lines, records.line_num on
     # StatusUpdate lines — they're disjoint, so the JOIN produces zero rows
-    # and the frontend sees an empty result). Hardcode the only model the
-    # current parser emits and apply the filter in Python.
-    if model and model not in _ONLY_MODEL:
+    # and the frontend sees an empty result). Hardcode the models the parser
+    # emits and apply the filter in Python.
+    if model and not any(m in model for m in _ONLY_MODELS):
         return {"range": range, "project": project, "bucket_s": bucket_s, "buckets": []}
     args: list[Any] = [since]
     proj_filter = ""
@@ -153,7 +153,7 @@ async def tool_error_rate(
             GROUP BY 1, 3
             ORDER BY 1, 3
             """,
-            [_ONLY_MODEL, *args],
+            [model if model else _ONLY_MODELS[0], *args],
         ).fetchall()
 
     return {

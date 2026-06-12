@@ -3,16 +3,32 @@
  * Mirrors backend/parse.py and ~/.kimi/scripts/parse_wire.py.
  */
 
-window.PARSER_VERSION = "1";
+window.PARSER_VERSION = "2";
 
 const MODEL_RATES = {
-  "kimi-for-coding": { fresh: 0.95, create: 0.00, read: 0.16, output: 4.00 },
-  "kimi-k2-6":       { fresh: 0.95, create: 0.00, read: 0.16, output: 4.00 },
-  "kimi-k2":         { fresh: 0.95, create: 0.00, read: 0.16, output: 4.00 },
-  "kimi":            { fresh: 0.95, create: 0.00, read: 0.16, output: 4.00 },
+  "kimi-k2-7-code": { fresh: 0.95, create: 0.00, read: 0.19, output: 4.00 },
+  "kimi-k2-6":      { fresh: 0.95, create: 0.00, read: 0.16, output: 4.00 },
 };
 
 const DEFAULT_RATES = MODEL_RATES["kimi-k2-6"];
+
+// Hardcoded model transition.  Anchor = now - 12h; effective cutoff =
+// anchor - 12h.  Sessions whose first event is strictly before this UTC
+// epoch are labelled kimi-k2-6, everything else is kimi-k2-7-code.
+const MODEL_CUTOFF_EPOCH = 1781217035;
+
+function tsToEpoch(ts) {
+  if (ts == null) return null;
+  if (typeof ts === "number") return ts;
+  const d = new Date(ts);
+  return isNaN(d.getTime()) ? null : d.getTime() / 1000;
+}
+
+function modelForSession(firstEventTs) {
+  const epoch = tsToEpoch(firstEventTs);
+  if (epoch == null) return "kimi-k2-7-code";
+  return epoch < MODEL_CUTOFF_EPOCH ? "kimi-k2-6" : "kimi-k2-7-code";
+}
 
 window.rateForModel = function rateForModel(model) {
   if (!model) return DEFAULT_RATES;
@@ -210,6 +226,18 @@ window.parseTranscript = function parseTranscript(blob) {
     }
   }
 
+  // First event timestamp drives the per-session model label.
+  let firstEventTs = null;
+  for (const e of events) {
+    if (e.ts != null) { firstEventTs = e.ts; break; }
+  }
+  if (firstEventTs == null) {
+    for (const m of metaEvents) {
+      if (m.ts != null) { firstEventTs = m.ts; break; }
+    }
+  }
+  const sessionModel = modelForSession(firstEventTs);
+
   // Build records from status_updates
   const records = [];
   let prevInput = 0;
@@ -225,7 +253,7 @@ window.parseTranscript = function parseTranscript(blob) {
     const output = tu.output || 0;
     const totalInput = fresh + create + read;
 
-    const rates = window.rateForModel("kimi-k2-6");
+    const rates = window.rateForModel(sessionModel);
     const cost = (
       fresh * rates.fresh / 1e6 +
       create * rates.create / 1e6 +
@@ -237,7 +265,7 @@ window.parseTranscript = function parseTranscript(blob) {
       line_num: m.line,
       uuid: m.message_id || null,
       ts: m.ts,
-      model: "kimi-k2-6",
+      model: sessionModel,
       fresh_tokens: fresh,
       cache_creation_tokens: create,
       cache_read_tokens: read,
@@ -333,8 +361,8 @@ window.computeStats = function computeStats(events, metaEvents) {
   return lines.filter(Boolean).join("\n");
 };
 
-window.computeCache = function computeCache(metaEvents) {
-  const rates = window.rateForModel("kimi-k2-6");
+window.computeCache = function computeCache(metaEvents, firstEventTs) {
+  const rates = window.rateForModel(modelForSession(firstEventTs));
   let totalInputOther = 0;
   let totalOutput = 0;
   let totalCacheRead = 0;

@@ -16,10 +16,8 @@ from __future__ import annotations
 
 # Order: most-specific first.
 MODEL_RATES = {
-    "kimi-for-coding": {"fresh": 0.95, "create": 0.00, "read": 0.16, "output": 4.00},
-    "kimi-k2-6":       {"fresh": 0.95, "create": 0.00, "read": 0.16, "output": 4.00},
-    "kimi-k2":         {"fresh": 0.95, "create": 0.00, "read": 0.16, "output": 4.00},
-    "kimi":            {"fresh": 0.95, "create": 0.00, "read": 0.16, "output": 4.00},
+    "kimi-k2-7-code": {"fresh": 0.95, "create": 0.00, "read": 0.19, "output": 4.00},
+    "kimi-k2-6":      {"fresh": 0.95, "create": 0.00, "read": 0.16, "output": 4.00},
 }
 
 DEFAULT_RATES = MODEL_RATES["kimi-k2-6"]

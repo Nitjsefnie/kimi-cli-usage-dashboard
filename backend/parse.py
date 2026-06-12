@@ -10,12 +10,19 @@ bump to invalidate every files row.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Iterable
 
 import orjson
 
 from backend import pricing
+
+# Hardcoded model transition.  The anchor is "now - 12h"; the effective
+# cutoff is "anchor - 12h".  Sessions whose first event is strictly
+# before this UTC epoch are labelled kimi-k2-6, everything else (including
+# sessions with no usable timestamp) is labelled kimi-k2-7-code.
+MODEL_CUTOFF_EPOCH = 1781217035
+MODEL_CUTOFF_DT = datetime.fromtimestamp(MODEL_CUTOFF_EPOCH, tz=timezone.utc)
 
 
 def _to_dt(s: str | float | None):
@@ -59,6 +66,9 @@ def parse_file(file_key: str, blob: bytes) -> dict:
     # For text_chars: accumulate ContentPart.text since last TurnBegin
     text_chars_since_turn: int = 0
 
+    # First event timestamp drives the per-session model label.
+    first_event_ts: datetime | None = None
+
     for line_num, raw in enumerate(blob.splitlines(), 1):
         if not raw:
             continue
@@ -72,6 +82,8 @@ def parse_file(file_key: str, blob: bytes) -> dict:
         msg_type = msg.get("type", "")
         payload = msg.get("payload", {})
         ts_dt = _to_dt(ts_raw)
+        if ts_dt is not None and first_event_ts is None:
+            first_event_ts = ts_dt
 
         if msg_type == "TurnBegin":
             # Close previous turn if open
@@ -154,7 +166,12 @@ def parse_file(file_key: str, blob: bytes) -> dict:
             # Consume the anchor once we record a StatusUpdate for this turn
             pending_turn_begin_ts = None
 
-            model = "kimi-k2-6"  # Kimi wire format does not embed model per event
+            # Kimi wire format does not embed model per event; fall back to a
+            # hardcoded time-based assignment using the session's first event.
+            if first_event_ts is not None and first_event_ts < MODEL_CUTOFF_DT:
+                model = "kimi-k2-6"
+            else:
+                model = "kimi-k2-7-code"
             cost = pricing.compute_cost(
                 model,
                 fresh=fresh, create=create, read=read, output=output,

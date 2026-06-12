@@ -12,8 +12,8 @@
   - `parse.py` — wire.jsonl → records + ctx_turns. Mirrors
     the canonical `~/.kimi/scripts/parse_wire.py` for turn-based
     StatusUpdate extraction.
-  - `pricing.py` — single source of truth for Kimi K2.6 rates. Bump
-    `PARSER_VERSION` in `.env` whenever this changes.
+  - `pricing.py` — single source of truth for Kimi K2.6 / K2.7 Code rates.
+    Bump `PARSER_VERSION` in `.env` whenever this changes.
   - `ingest.py` — R2 walk, etag/parser-version reparse decision, persistence
     in two-phase transactions, broadcasts `ingest_done` SSE on success.
   - `r2.py` — S3 client with `file://` filesystem-mirror fallback for dev.
@@ -36,7 +36,8 @@
   build step).
   - `app.jsx` — top-level shell, routing, dashboard fetcher, SSE listener.
   - `parser.js` — in-browser wire.jsonl parser used by the Inspector.
-    Pricing table here MUST match `backend/pricing.py`.
+    Pricing table and time-based model assignment here MUST match
+    `backend/pricing.py` and `backend/parse.py`.
   - `dashboard-charts.jsx`, `dashboard-charts-extra.jsx` — SVG panels.
   - `views/` — `cache-view.jsx`, `context-growth-view-v2.jsx`.
 
@@ -49,8 +50,10 @@
 
 ## Conventions
 
-- **Cost uses Kimi K2.6 rates**. `cache_creation` is billed at a flat rate
-  (no TTL split in Kimi wire format).
+- **Cost uses Kimi K2.6 or K2.7 Code rates**. Sessions whose first event is
+  before the hardcoded cutoff are labelled `kimi-k2-6`; newer sessions are
+  `kimi-k2-7-code`. `cache_creation` is billed at a flat rate (no TTL split in
+  Kimi wire format).
 - **Cross-file uuid dedup happens at READ time** via `DISTINCT ON (uuid)`
   in `/api/dashboard`, `/api/cache`, etc. There is no persisted Phase 2
   rollup table.

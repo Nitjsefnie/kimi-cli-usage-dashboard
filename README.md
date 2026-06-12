@@ -26,7 +26,7 @@ backend/          — FastAPI application
   app.py          — Startup/shutdown, route mounting, static asset serving
   api.py          — REST endpoints
   parse.py        — wire.jsonl → records + ctx_turns
-  pricing.py      — Kimi K2.6 rates
+  pricing.py      — Kimi K2.6 / K2.7 Code rates
   ingest.py       — R2 walk, etag/parser-version reparse decision
   r2.py           — S3 client with file:// fallback for dev
   auth.py         — PBKDF2-SHA256 helpers
