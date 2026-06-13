@@ -110,7 +110,7 @@ function txToDashData(tx) {
 function App() {
   const [route, setRoute] = useState('dashboard'); // dashboard | sessions | session
   const [tx, setTx] = useState(null); // parsed transcript {events, meta, stats}
-  const [filename, setFilename] = useState('');
+  const [, setFilename] = useState('');
   const [synth, setSynth] = useState(null);
   const [useSynth, setUseSynth] = useState(true);
   const [backendDash, setBackendDash] = useState(null);
@@ -185,9 +185,6 @@ function App() {
   const dashData = backendDash
     ? backendDashToShape(backendDash)
     : ((!useSynth && liveData) ? liveData : synth);
-  const dataLabel = backendDash
-    ? `backend: ${activeProject || 'all projects'}`
-    : ((!useSynth && liveData) ? `live: ${filename}` : 'synthetic preview');
 
   function loadFile(file) {
     const reader = new FileReader();
@@ -318,7 +315,7 @@ function App() {
       {backendOn && (
         <RangePicker active={activeRange} onChange={setActiveRange} />
       )}
-      {route === 'dashboard' && dashData && <Dashboard synth={dashData} dataLabel={dataLabel} models={models} backendOn={backendOn} activeProject={activeProject} activeRange={activeRange} dashNonce={dashNonce} />}
+      {route === 'dashboard' && dashData && <Dashboard synth={dashData} models={models} backendOn={backendOn} activeProject={activeProject} activeRange={activeRange} dashNonce={dashNonce} />}
       {route === 'sessions' && dashData && (
         <SessionsList
           synth={dashData}
@@ -507,7 +504,7 @@ function computeSessions(events) {
   return { sessions, windowBoundaries };
 }
 
-function Dashboard({ synth, dataLabel, models, backendOn, activeProject, activeRange, dashNonce }) {
+function Dashboard({ synth, models, backendOn, activeProject, activeRange, dashNonce }) {
   const { events, limitHits, range, costByModel: backendByModel, sessionsOverride, totalSessions, mainWUsage, mainEmpty, subagentFiles, subagentOnlySessions, responseSizes, ctxTraces, bucketS } = synth;
   const hasBackendByModel = backendByModel && Object.keys(backendByModel).length > 0;
   const computed = useMemo(() => computeSessions(events), [events]);
@@ -577,7 +574,6 @@ function Dashboard({ synth, dataLabel, models, backendOn, activeProject, activeR
 
   return (
     <div className="dashboard">
-      <div className="muted" style={{ padding: '0 2px' }}>data: {dataLabel}</div>
       <div className="dash-summary">
         <Stat label="window" value={`${window.fmtDate(range.start, {day:true})} – ${window.fmtDate(range.end, {day:true})}`} />
         <Stat label="main sessions with usage" value={(mainWUsage != null ? mainWUsage : (totalSessions != null ? totalSessions : (events.reduce((s, e) => s + (e.session_count || 0), 0) || sessions.length))).toLocaleString()} />
