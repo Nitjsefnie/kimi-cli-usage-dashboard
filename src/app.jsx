@@ -504,6 +504,104 @@ function computeSessions(events) {
   return { sessions, windowBoundaries };
 }
 
+// Compute Token Breakdown rows (tokens + cost per type) from a set of
+// hourly events. Shared by TokenBreakdownPanel; the per-panel model filter
+// passes a pre-filtered subset of events. Kimi never emits cache_create, so
+// the breakdown is Input / Output / Cache Read only.
+function computeTokenBreakdown(events) {
+  const t = { input: 0, output: 0, cr: 0 };
+  for (const e of events) {
+    t.input += e.input_tokens; t.output += e.output_tokens;
+    t.cr += e.cache_read;
+  }
+  const tokenTotal = t.input + t.output + t.cr;
+
+  const c = { input: 0, output: 0, cr: 0 };
+  if (window.rateForModel) {
+    for (const e of events) {
+      const r = window.rateForModel(e.model);
+      c.input  += (e.input_tokens  || 0) * r.fresh;
+      c.output += (e.output_tokens || 0) * r.out;
+      c.cr     += (e.cache_read    || 0) * r.read;
+    }
+    for (const k of Object.keys(c)) c[k] = c[k] / 1_000_000;
+  }
+  const costTotal = c.input + c.output + c.cr;
+
+  const rows = [
+    { label: 'Input',      value: t.input,  cost: c.input,  color: window.dashboardCol.inputTokens },
+    { label: 'Output',     value: t.output, cost: c.output, color: window.dashboardCol.outputTokens },
+    { label: 'Cache Read', value: t.cr,     cost: c.cr,     color: window.dashboardCol.cacheReadTokens },
+  ].filter(r => r.value > 0).sort((a, b) => b.cost - a.cost);
+
+  return { rows, tokenTotal: tokenTotal || 1, costTotal: costTotal || 1 };
+}
+
+// Paired token/cost breakdown bars with a per-panel model filter, mirroring
+// the model select on Tool Usage Ratio over Time. The filter is client-side
+// (events are already loaded) and applies to both bars at once.
+function TokenBreakdownPanel({ events }) {
+  const [activeModel, setActiveModel] = useState('');
+
+  // Model options derived from the events actually present (already short
+  // names via backendDashToShape), ordered by cost desc.
+  const modelOpts = useMemo(() => {
+    const byModel = {};
+    for (const e of events) {
+      if (!e.model || e.model === '<synthetic>' || e.model === 'synthetic') continue;
+      byModel[e.model] = (byModel[e.model] || 0) + (e.cost_usd || 0);
+    }
+    return Object.entries(byModel).sort((a, b) => b[1] - a[1]).map(([k]) => k);
+  }, [events]);
+
+  const filtered = useMemo(
+    () => (activeModel ? events.filter(e => e.model === activeModel) : events),
+    [events, activeModel]);
+  const { rows, tokenTotal, costTotal } = useMemo(
+    () => computeTokenBreakdown(filtered), [filtered]);
+
+  // One bordered card (matching the sibling "Cost by Model" card) so the
+  // shared model filter visibly belongs to the whole Token Breakdown panel
+  // — the two bars are the same data sorted by tokens vs by cost, so a
+  // single picker drives both.
+  return (
+    <div style={{
+      background: 'var(--bg-card)', border: '1px solid var(--border)',
+      borderRadius: 4, display: 'flex', flexDirection: 'column',
+    }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
+        gap: 8, padding: '8px 14px 0',
+        fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--muted)',
+      }}>
+        <span>model:</span>
+        <select
+          value={activeModel}
+          onChange={e => setActiveModel(e.target.value)}
+          style={{
+            background: 'var(--panel-2)', color: 'var(--fg)',
+            border: '1px solid var(--border)', borderRadius: 4,
+            padding: '3px 6px', fontFamily: 'var(--mono)', fontSize: 11,
+            cursor: 'pointer',
+          }}>
+          <option value="">All</option>
+          {modelOpts.map(m => <option key={m} value={m}>{m}</option>)}
+        </select>
+      </div>
+      <window.HBar
+        embedded
+        title="Token Breakdown — by tokens"
+        rows={[...rows].sort((a, b) => b.value - a.value)}
+        fmt={r => `${window.humanFmt(r.value)} (${(r.value / tokenTotal * 100).toFixed(1)}%)`} />
+      <window.HBar
+        embedded
+        title="Token Breakdown — by cost"
+        rows={[...rows].map(r => ({ ...r, value: r.cost })).sort((a, b) => b.value - a.value)}
+        fmt={r => `${window.humanCurrency(r.value)} (${(r.value / costTotal * 100).toFixed(1)}%)`} />
+    </div>
+  );
+}
+
 function Dashboard({ synth, models, backendOn, activeProject, activeRange, dashNonce }) {
   const { events, limitHits, range, costByModel: backendByModel, sessionsOverride, totalSessions, mainWUsage, mainEmpty, subagentFiles, subagentOnlySessions, responseSizes, ctxTraces, bucketS } = synth;
   const hasBackendByModel = backendByModel && Object.keys(backendByModel).length > 0;
@@ -539,31 +637,6 @@ function Dashboard({ synth, models, backendOn, activeProject, activeRange, dashN
     if (span / b < MIN_BINS) break;
     binMs = b;
   }
-
-  // Per-token-type cost — sum tokens × per-model rate over hourly
-  // events using the shared rate table from parser.js. Lets the Token
-  // Breakdown panel show "{tokens} ({tok%}), ${cost} ({cost%})" per row.
-  const costByType = useMemo(() => {
-    const c = { input: 0, output: 0, cr: 0, total: 0 };
-    if (!window.rateForModel) return c;
-    for (const e of events) {
-      const r = window.rateForModel(e.model);
-      c.input  += (e.input_tokens   || 0) * r.fresh;
-      c.output += (e.output_tokens  || 0) * r.out;
-      c.cr     += (e.cache_read     || 0) * r.read;
-    }
-    for (const k of Object.keys(c)) c[k] = c[k] / 1_000_000;
-    c.total = c.input + c.output + c.cr;
-    return c;
-  }, [events]);
-
-  const tokenBreakdown = [
-    { label: 'Input',      value: totals.input,  cost: costByType.input,  color: window.dashboardCol.inputTokens },
-    { label: 'Output',     value: totals.output, cost: costByType.output, color: window.dashboardCol.outputTokens },
-    { label: 'Cache Read', value: totals.cr,     cost: costByType.cr,     color: window.dashboardCol.cacheReadTokens },
-  ].filter(r => r.value > 0).sort((a, b) => b.cost - a.cost);
-  const tokenBreakdownTotal = totals.total || 1;
-  const tokenBreakdownCostTotal = costByType.total || 1;
 
   const costByModel = Object.entries(totals.byModel)
     .filter(([, v]) => v > 0)
@@ -607,18 +680,7 @@ function Dashboard({ synth, models, backendOn, activeProject, activeRange, dashN
           rows={costByModel}
           fixedColors={window.modelColors}
           fmt={r => window.humanCurrency(r.value)} />
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <window.HBar
-            title="Token Breakdown — by tokens"
-            rows={[...tokenBreakdown].sort((a, b) => b.value - a.value)}
-            fmt={r => `${window.humanFmt(r.value)} (${(r.value / tokenBreakdownTotal * 100).toFixed(1)}%)`} />
-          <window.HBar
-            title="Token Breakdown — by cost"
-            rows={[...tokenBreakdown]
-              .map(r => ({ ...r, value: r.cost }))
-              .sort((a, b) => b.value - a.value)}
-            fmt={r => `${window.humanCurrency(r.value)} (${(r.value / tokenBreakdownCostTotal * 100).toFixed(1)}%)`} />
-        </div>
+        <TokenBreakdownPanel events={events} />
       </div>
 
       {responseSizes && responseSizes.length > 0 && (
