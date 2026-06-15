@@ -12,6 +12,7 @@ API surface:
 from __future__ import annotations
 
 import hashlib
+import lzma
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -100,13 +101,22 @@ def get_object(key: str) -> bytes:
         ) else root
         full = _safe_join(scan_root, key)
         with open(full, "rb") as f:
-            return f.read()
-    s3 = _boto_client()
-    return s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+            data = f.read()
+    else:
+        s3 = _boto_client()
+        data = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+    # Objects may be stored per-object xz-compressed (`*.jsonl.xz`); inflate
+    # transparently so callers always see plain bytes. xz is stdlib (lzma).
+    if key.endswith(".xz"):
+        data = lzma.decompress(data)
+    return data
 
 
 def get_stream(key: str):
-    """Open a streaming reader. Caller is responsible for closing it."""
+    """Open a streaming reader. Caller is responsible for closing it.
+
+    For `.xz` keys the returned stream transparently inflates xz on read.
+    """
     file_mode, root = _is_file_mode()
     bucket = os.environ.get("R2_BUCKET", "kimi")
     if file_mode:
@@ -114,9 +124,13 @@ def get_stream(key: str):
             os.path.join(root, bucket)
         ) else root
         full = _safe_join(scan_root, key)
-        return open(full, "rb")
-    s3 = _boto_client()
-    return s3.get_object(Bucket=bucket, Key=key)["Body"]
+        raw = open(full, "rb")
+    else:
+        s3 = _boto_client()
+        raw = s3.get_object(Bucket=bucket, Key=key)["Body"]
+    if key.endswith(".xz"):
+        return lzma.LZMAFile(raw)
+    return raw
 
 
 def _boto_client():

@@ -61,7 +61,7 @@ def run_ingest(trigger: str) -> dict:
         for obj in r2.list_keys():
             parts = obj.key.split("/")
             if len(parts) >= 4 and parts[0] == "sessions" \
-                    and parts[-1] == "wire.jsonl" and obj.key.endswith(".jsonl"):
+                    and parts[-1] in ("wire.jsonl", "wire.jsonl.xz"):
                 wire_objs.append(obj)
             elif len(parts) == 3 and parts[0] == "sessions" \
                     and parts[2] == "project.json":

@@ -1,3 +1,4 @@
+import lzma
 import os
 import shutil
 import tempfile
@@ -10,8 +11,8 @@ from backend import r2
 
 @pytest.fixture
 def mini_r2(monkeypatch):
-    tmp = tempfile.mkdtemp(prefix="sv-test-r2-")
-    root = Path(tmp) / "claude"
+    tmp = tempfile.mkdtemp(prefix="kd-test-r2-")
+    root = Path(tmp) / "kimi"
     (root / "proj-a" / "sess-1").mkdir(parents=True)
     (root / "proj-a" / "sess-1" / "sess-1.jsonl").write_text("hello\n")
     (root / "proj-b" / "sess-2").mkdir(parents=True)
@@ -42,6 +43,23 @@ def test_list_keys_with_prefix(mini_r2):
 
 def test_get_object(mini_r2):
     assert r2.get_object("proj-a/sess-1/sess-1.jsonl") == b"hello\n"
+
+
+def test_get_object_inflates_xz(mini_r2):
+    plain = b'{"type":"user"}\n{"type":"assistant"}\n'
+    (mini_r2 / "proj-a" / "sess-1" / "wire.jsonl.xz").write_bytes(
+        lzma.compress(plain)
+    )
+    assert r2.get_object("proj-a/sess-1/wire.jsonl.xz") == plain
+
+
+def test_get_stream_inflates_xz(mini_r2):
+    plain = b"alpha\nbeta\ngamma\n"
+    (mini_r2 / "proj-a" / "sess-1" / "context.jsonl.xz").write_bytes(
+        lzma.compress(plain)
+    )
+    with r2.get_stream("proj-a/sess-1/context.jsonl.xz") as fh:
+        assert fh.read() == plain
 
 
 def test_path_traversal_blocked(mini_r2):
