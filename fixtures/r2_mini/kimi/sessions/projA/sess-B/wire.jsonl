@@ -1,0 +1,1 @@
+{"timestamp": "2026-06-14T12:42:00Z", "message": {"type": "StatusUpdate", "payload": {"message_id": "msg-sess-b", "token_usage": {"input_other": 10, "input_cache_creation": 0, "input_cache_read": 0, "output": 5}}}}

@@ -1,0 +1,2 @@
+{"timestamp": "2026-06-14T12:44:00Z", "message": {"type": "StatusUpdate", "payload": {"message_id": "shared-uuid-1", "token_usage": {"input_other": 1000, "input_cache_creation": 0, "input_cache_read": 0, "output": 500}}}}
+{"timestamp": "2026-06-14T12:44:01Z", "message": {"type": "StatusUpdate", "payload": {"message_id": "sess-D-only", "token_usage": {"input_other": 50, "input_cache_creation": 0, "input_cache_read": 0, "output": 25}}}}

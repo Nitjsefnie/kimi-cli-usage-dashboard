@@ -1,0 +1,4 @@
+{"timestamp": "2026-06-14T12:40:59Z", "message": {"type": "TurnBegin", "payload": {"user_input": "hello"}}}
+{"timestamp": "2026-06-14T12:41:00Z", "message": {"type": "ContentPart", "payload": {"type": "text", "text": "Hello."}}}
+{"timestamp": "2026-06-14T12:41:02Z", "message": {"type": "StatusUpdate", "payload": {"message_id": "msg-sess-a", "token_usage": {"input_other": 100, "input_cache_creation": 0, "input_cache_read": 0, "output": 200}}}}
+{"timestamp": "2026-06-14T12:41:03Z", "message": {"type": "TurnEnd", "payload": {}}}

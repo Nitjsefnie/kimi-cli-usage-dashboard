@@ -1,0 +1,1 @@
+{"timestamp": "2026-06-14T12:43:01Z", "message": {"type": "StatusUpdate", "payload": {"message_id": "shared-uuid-1", "token_usage": {"input_other": 1000, "input_cache_creation": 0, "input_cache_read": 0, "output": 500}}}}

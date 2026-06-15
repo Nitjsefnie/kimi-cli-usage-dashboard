@@ -13,7 +13,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 @pytest.fixture
 def fresh_db(monkeypatch):
     """Per-test schema reset on a separate DB."""
-    test_db = "claude_viz_test"
+    test_db = "kimi_viz_test"
     os.system(f"dropdb --if-exists {test_db} 2>/dev/null")
     os.system(f"createdb {test_db} 2>/dev/null")
     os.system(f"psql {test_db} -f {_REPO_ROOT / 'backend/schema.sql'} >/dev/null")
@@ -37,16 +37,25 @@ def fresh_db(monkeypatch):
 @pytest.fixture
 def mini_r2_env(monkeypatch):
     src = _REPO_ROOT / "fixtures/r2_mini"
-    tmp = tempfile.mkdtemp(prefix="sv-ingest-")
+    tmp = tempfile.mkdtemp(prefix="kd-ingest-")
     shutil.copytree(src, Path(tmp) / "r2")
     monkeypatch.setenv("R2_ENDPOINT", f"file://{tmp}/r2/")
-    yield Path(tmp) / "r2" / "claude"
+    yield Path(tmp) / "r2" / "kimi"
     shutil.rmtree(tmp)
 
 
+def _wire_blob(message_id, input_other, output):
+    return (
+        b'{"timestamp":"2026-06-14T12:00:00Z","message":{"type":"StatusUpdate",'
+        b'"payload":{"message_id":"%b","token_usage":{'
+        b'"input_other":%b,"input_cache_creation":0,"input_cache_read":0,"output":%b}}}}\n'
+        % (message_id.encode(), str(input_other).encode(), str(output).encode())
+    )
+
+
 def test_ingest_inserts_one_row_per_jsonl(fresh_db, mini_r2_env):
-    """Mini mirror has 5 jsonls (4 main + 1 peer) under 4 sessions
-    in 2 projects. Expect 5 rows in `files`, 4 with is_main=true,
+    """Mini mirror has 5 wire.jsonls (4 main + 1 subagent peer) under 4
+    sessions in 2 projects. Expect 5 rows in `files`, 4 with is_main=true,
     4 distinct session_ids, 2 projects."""
     result = ingest.run_ingest(trigger="manual")
     assert result["error"] is None
@@ -63,19 +72,17 @@ def test_ingest_inserts_one_row_per_jsonl(fresh_db, mini_r2_env):
 
 
 def test_records_populated_with_no_write_time_dedup(fresh_db, mini_r2_env):
-    """sess-C main + sess-C agent + sess-D main all have uuid='shared-uuid-1'.
-    The new ingest writes per-file with NO cross-file dedup at write time
+    """sess-C main + sess-C subagent + sess-D main all have uuid='shared-uuid-1'.
+    The ingest writes per-file with NO cross-file dedup at write time
     — so records has ALL three rows. Query-time DISTINCT ON is the dedup."""
     ingest.run_ingest(trigger="manual")
     with db.viz_conn() as c:
         n = c.execute("SELECT COUNT(*) FROM records").fetchone()[0]
         assert n > 0
-        # All three files' rows for 'shared-uuid-1' kept verbatim
         cnt = c.execute(
             "SELECT COUNT(*) FROM records WHERE uuid = 'shared-uuid-1'"
         ).fetchone()[0]
         assert cnt == 3
-        # Query-time dedup gives 1
         cnt_distinct = c.execute(
             "SELECT COUNT(DISTINCT uuid) FROM records WHERE uuid = 'shared-uuid-1'"
         ).fetchone()[0]
@@ -96,15 +103,15 @@ def test_etag_change_triggers_per_file_reparse(fresh_db, mini_r2_env):
     ingest.run_ingest(trigger="manual")
     with db.viz_conn() as c:
         before_etag = c.execute(
-            "SELECT r2_etag FROM files WHERE file_key LIKE '%sess-A.jsonl'"
+            "SELECT r2_etag FROM files WHERE file_key LIKE '%sess-A/wire.jsonl'"
         ).fetchone()[0]
-    target = mini_r2_env / "projA" / "sess-A" / "sess-A.jsonl"
+    target = mini_r2_env / "sessions" / "projA" / "sess-A" / "wire.jsonl"
     target.write_text(target.read_text() + "\n")
     result = ingest.run_ingest(trigger="manual")
     assert result["reparsed"] == 1
     with db.viz_conn() as c:
         after_etag = c.execute(
-            "SELECT r2_etag FROM files WHERE file_key LIKE '%sess-A.jsonl'"
+            "SELECT r2_etag FROM files WHERE file_key LIKE '%sess-A/wire.jsonl'"
         ).fetchone()[0]
     assert before_etag != after_etag
 
@@ -113,30 +120,30 @@ def test_parser_version_bump_reparses_all(fresh_db, mini_r2_env, monkeypatch):
     ingest.run_ingest(trigger="manual")
     monkeypatch.setenv("PARSER_VERSION", "2")
     result = ingest.run_ingest(trigger="manual")
-    assert result["reparsed"] == 5  # all 5 files
+    assert result["reparsed"] == 5
 
 
 def test_deleted_file_removed(fresh_db, mini_r2_env):
     ingest.run_ingest(trigger="manual")
-    target = mini_r2_env / "projA" / "sess-B" / "sess-B.jsonl"
+    target = mini_r2_env / "sessions" / "projA" / "sess-B" / "wire.jsonl"
     target.unlink()
     result = ingest.run_ingest(trigger="manual")
     assert result["deleted"] == 1
     with db.viz_conn() as c:
         n = c.execute(
-            "SELECT COUNT(*) FROM files WHERE file_key LIKE '%sess-B.jsonl'"
+            "SELECT COUNT(*) FROM files WHERE file_key LIKE '%sess-B/wire.jsonl'"
         ).fetchone()[0]
         assert n == 0
 
 
 def test_records_cascade_on_file_delete(fresh_db, mini_r2_env):
     ingest.run_ingest(trigger="manual")
-    target = mini_r2_env / "projA" / "sess-A" / "sess-A.jsonl"
+    target = mini_r2_env / "sessions" / "projA" / "sess-A" / "wire.jsonl"
     target.unlink()
     ingest.run_ingest(trigger="manual")
     with db.viz_conn() as c:
         n = c.execute(
-            "SELECT COUNT(*) FROM records WHERE file_key LIKE '%sess-A.jsonl'"
+            "SELECT COUNT(*) FROM records WHERE file_key LIKE '%sess-A/wire.jsonl'"
         ).fetchone()[0]
         assert n == 0
 
@@ -159,17 +166,10 @@ def test_first_seen_at_uses_least(fresh_db, mini_r2_env):
             "SELECT first_seen_at FROM projects WHERE project_id = 'projA'"
         ).fetchone()[0]
 
-    new_dir = mini_r2_env / "projA" / "sess-NEW"
+    new_dir = mini_r2_env / "sessions" / "projA" / "sess-NEW"
     new_dir.mkdir()
-    new_file = new_dir / "sess-NEW.jsonl"
-    new_file.write_text(
-        '{"type":"assistant","timestamp":"2026-05-07T09:00:00Z",'
-        '"uuid":"u-new","requestId":"req-new","sessionId":"sess-NEW",'
-        '"message":{"role":"assistant","model":"claude-sonnet-4-5",'
-        '"content":[{"type":"text","text":"x"}],'
-        '"usage":{"input_tokens":1,"output_tokens":1,'
-        '"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}\n'
-    )
+    new_file = new_dir / "wire.jsonl"
+    new_file.write_bytes(_wire_blob("u-new", 1, 1))
     older_ts = before.timestamp() - 3600
     _os.utime(new_file, (older_ts, older_ts))
 
