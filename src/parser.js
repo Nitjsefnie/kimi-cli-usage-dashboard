@@ -3,7 +3,7 @@
  * Mirrors backend/parse.py and ~/.kimi/scripts/parse_wire.py.
  */
 
-window.PARSER_VERSION = "2";
+window.PARSER_VERSION = "3";
 
 const MODEL_RATES = {
   "kimi-k2-7-code": { fresh: 0.95, create: 0.00, read: 0.19, output: 4.00 },
@@ -81,7 +81,31 @@ function _iterJsonObjects(line) {
   return out;
 }
 
-window.parseTranscript = function parseTranscript(blob) {
+function _detectFormat(blob) {
+  const lines = blob.split(/\r?\n/);
+  for (const line of lines) {
+    if (!line) continue;
+    let obj;
+    try {
+      obj = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!obj || typeof obj !== "object") continue;
+    if (obj.type === "metadata") {
+      return obj.created_at != null ? "kimi-code" : "legacy";
+    }
+    if (["context.append_message", "context.append_loop_event", "usage.record", "turn.prompt", "turn.steer"].includes(obj.type)) {
+      return "kimi-code";
+    }
+    if (obj.timestamp && ["StatusUpdate", "TurnBegin", "ToolCall", "ContentPart"].includes((obj.message || {}).type)) {
+      return "legacy";
+    }
+  }
+  return "legacy";
+}
+
+function _parseLegacy(blob) {
   const lines = blob.split(/\r?\n/);
   const events = [];
   const metaEvents = [];
@@ -295,6 +319,308 @@ window.parseTranscript = function parseTranscript(blob) {
     events,
     meta_events: metaEvents,
   };
+}
+
+function _kcParseToolCall(tc) {
+  if (tc.type !== "function") return { name: "", args: null, id: "" };
+  const id = tc.id || "";
+  if ("name" in tc) {
+    return { name: tc.name || "", args: tc.arguments, id };
+  }
+  const fn = tc.function || {};
+  return { name: fn.name || "", args: fn.arguments, id };
+}
+
+function _kcArgsToInput(args) {
+  if (args == null) return {};
+  if (typeof args === "object") return args;
+  if (typeof args === "string") {
+    try { return args ? JSON.parse(args) : {}; }
+    catch { return { _raw: args }; }
+  }
+  return { _raw: args };
+}
+
+function _kcResultDetail(result) {
+  if (!result || typeof result !== "object") return String(result || "");
+  const output = result.output;
+  if (Array.isArray(output)) {
+    return output.map(x => (typeof x === "object" ? x.text || "" : String(x))).join("\n");
+  }
+  return String(output || "");
+}
+
+function _parseKimiCode(blob) {
+  const lines = blob.split(/\r?\n/);
+  const events = [];
+  const metaEvents = [];
+  const toolUses = [];
+  const toolResultIsError = {};
+
+  let currentTurn = null;
+  let currentTurnId = null;
+  let textCharsSinceTurn = 0;
+  let pendingTurnBeginTs = null;
+
+  function closeTurn(lineNum, ts) {
+    if (currentTurn) {
+      currentTurn.endLine = lineNum;
+      currentTurn.endTs = ts;
+      metaEvents.push({ type: "turn_end", ts, line: lineNum, raw: {} });
+      currentTurn = null;
+    }
+  }
+  function startTurn(lineNum, ts) {
+    currentTurn = { beginLine: lineNum, beginTs: ts, statusLines: [] };
+    textCharsSinceTurn = 0;
+  }
+  function countText(content) {
+    let n = 0;
+    for (const p of (content || [])) {
+      if (p && p.type === "text") n += String(p.text || "").length;
+    }
+    return n;
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line) continue;
+    let obj;
+    try {
+      obj = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!obj || typeof obj !== "object") continue;
+
+    const typ = obj.type;
+    const lineNum = i + 1;
+
+    if (typ === "metadata") {
+      continue;
+    }
+
+    const tsMs = obj.time;
+    const ts = tsMs != null ? tsMs / 1000 : null;
+
+    if (typ === "turn.prompt" || typ === "turn.steer") {
+      closeTurn(lineNum, ts);
+      startTurn(lineNum, ts);
+      pendingTurnBeginTs = ts != null ? new Date(ts * 1000) : null;
+      const inputParts = obj.input || [];
+      const text = inputParts.map(p => (p && p.type === "text" ? p.text || "" : "")).join("");
+      events.push({ type: typ === "turn.steer" ? "steer_input" : "user_message", ts, line: lineNum, detail: text });
+      continue;
+    }
+
+    if (typ === "context.append_message") {
+      const msg = obj.message || {};
+      const role = msg.role;
+      const content = msg.content || [];
+      if (role === "assistant") {
+        textCharsSinceTurn += countText(content);
+        for (const p of content) {
+          if (!p) continue;
+          if (p.type === "text") events.push({ type: "assistant_text", ts, line: lineNum, detail: String(p.text || "") });
+          else if (p.type === "think") events.push({ type: "thinking", ts, line: lineNum, detail: String(p.think || "") });
+        }
+        for (const tc of (msg.toolCalls || [])) {
+          const { name, args, id } = _kcParseToolCall(tc);
+          const toolInput = _kcArgsToInput(args);
+          events.push({ type: "tool_call", ts, line: lineNum, tool_name: name, tool_input: toolInput, tool_call_id: id, detail: "" });
+          toolUses.push({
+            file_key: "", line_num: lineNum, idx: toolUses.length,
+            ts: ts, tool_name: name, tool_call_id: id, is_error: null,
+          });
+        }
+      } else if (role === "tool") {
+        const tcId = msg.toolCallId;
+        const detail = content.map(p => (p && p.type === "text" ? p.text || "" : "")).join("");
+        const isErr = !!msg.isError;
+        events.push({ type: "tool_result", ts, line: lineNum, tool_call_id: tcId || "", is_error: isErr, detail, message: "" });
+        if (tcId) toolResultIsError[tcId] = isErr;
+      } else if (role === "user") {
+        const text = content.map(p => (p && p.type === "text" ? p.text || "" : "")).join("");
+        events.push({ type: "user_message", ts, line: lineNum, detail: text });
+      }
+      continue;
+    }
+
+    if (typ === "context.append_loop_event") {
+      const ev = obj.event || {};
+      const et = ev.type;
+      const turnId = ev.turnId;
+
+      if (et === "step.begin") {
+        if (turnId !== currentTurnId) {
+          closeTurn(lineNum, ts);
+          currentTurnId = turnId;
+          startTurn(lineNum, ts);
+        }
+        metaEvents.push({ type: "step_begin", ts, line: lineNum, raw: ev });
+        continue;
+      }
+
+      if (et === "step.end") {
+        closeTurn(lineNum, ts);
+        continue;
+      }
+
+      if (et === "content.part") {
+        const part = ev.part || {};
+        if (part.type === "text") {
+          textCharsSinceTurn += String(part.text || "").length;
+          events.push({ type: "assistant_text", ts, line: lineNum, detail: String(part.text || "") });
+        } else if (part.type === "think") {
+          events.push({ type: "thinking", ts, line: lineNum, detail: String(part.think || "") });
+        }
+        continue;
+      }
+
+      if (et === "tool.call") {
+        const toolInput = _kcArgsToInput(ev.args);
+        events.push({ type: "tool_call", ts, line: lineNum, tool_name: ev.name || "", tool_input: toolInput, tool_call_id: ev.toolCallId || "", detail: "" });
+        toolUses.push({
+          file_key: "", line_num: lineNum, idx: toolUses.length,
+          ts: ts, tool_name: ev.name || "", tool_call_id: ev.toolCallId || "", is_error: null,
+        });
+        continue;
+      }
+
+      if (et === "tool.result") {
+        const tcId = ev.toolCallId;
+        const res = ev.result || {};
+        const isErr = !!(res.isError || res.is_error);
+        const detail = _kcResultDetail(res);
+        events.push({ type: "tool_result", ts, line: lineNum, tool_call_id: tcId || "", is_error: isErr, detail, message: "" });
+        if (tcId) toolResultIsError[tcId] = isErr;
+        continue;
+      }
+
+      continue;
+    }
+
+    if (typ === "usage.record") {
+      const usage = obj.usage || {};
+      const model = obj.model || "";
+      const fresh = usage.inputOther || 0;
+      const create = usage.inputCacheCreation || 0;
+      const read = usage.inputCacheRead || 0;
+      const output = usage.output || 0;
+      const totalInput = fresh + create + read;
+
+      let replyLatencyS = null;
+      if (pendingTurnBeginTs && ts != null) {
+        const delta = (new Date(ts * 1000) - pendingTurnBeginTs) / 1000;
+        if (delta >= 0) replyLatencyS = delta;
+      }
+      pendingTurnBeginTs = null;
+
+      const rates = window.rateForModel(model);
+      const cost = (
+        fresh * rates.fresh / 1e6 +
+        create * rates.create / 1e6 +
+        read * rates.read / 1e6 +
+        output * rates.output / 1e6
+      );
+
+      metaEvents.push({
+        type: "status_update", ts, line: lineNum,
+        token_usage: {
+          input_other: fresh,
+          input_cache_creation: create,
+          input_cache_read: read,
+          output: output,
+        },
+        model,
+        reply_latency_s: replyLatencyS,
+        raw: obj,
+      });
+
+      if (currentTurn) {
+        currentTurn.statusLines.push(lineNum);
+      }
+
+      continue;
+    }
+  }
+
+  closeTurn(lines.length, null);
+
+  // Resolve tool errors
+  for (const tu of toolUses) {
+    const tcId = tu.tool_call_id;
+    if (tcId && tcId in toolResultIsError) {
+      tu.is_error = toolResultIsError[tcId];
+    }
+  }
+
+  // Build records from status_updates
+  const records = [];
+  let prevInput = 0;
+  const ctxTurns = [];
+  let turnIdx = 0;
+
+  for (const m of metaEvents) {
+    if (m.type !== "status_update") continue;
+    const tu = m.token_usage || {};
+    const fresh = tu.input_other || 0;
+    const create = tu.input_cache_creation || 0;
+    const read = tu.input_cache_read || 0;
+    const output = tu.output || 0;
+    const totalInput = fresh + create + read;
+
+    const rates = window.rateForModel(m.model || "");
+    const cost = (
+      fresh * rates.fresh / 1e6 +
+      create * rates.create / 1e6 +
+      read * rates.read / 1e6 +
+      output * rates.output / 1e6
+    );
+
+    records.push({
+      line_num: m.line,
+      uuid: null,
+      ts: m.ts,
+      model: m.model || "",
+      fresh_tokens: fresh,
+      cache_creation_tokens: create,
+      cache_read_tokens: read,
+      output_tokens: output,
+      cost_usd: cost,
+      text_chars: textCharsSinceTurn,
+      reply_latency_s: m.reply_latency_s != null ? m.reply_latency_s : null,
+      ctx_input: totalInput,
+    });
+
+    if (totalInput > 0) {
+      turnIdx++;
+      ctxTurns.push({
+        idx: turnIdx,
+        ts: m.ts ? new Date(m.ts * 1000).toISOString() : "",
+        line: m.line,
+        input: totalInput,
+        output: output,
+        delta: totalInput - prevInput,
+      });
+      prevInput = totalInput;
+    }
+  }
+
+  return {
+    records,
+    ctx_turns: ctxTurns,
+    turn_count: ctxTurns.length,
+    events,
+    meta_events: metaEvents,
+    tool_uses: toolUses,
+  };
+}
+
+window.parseTranscript = function parseTranscript(blob) {
+  const fmt = _detectFormat(blob);
+  if (fmt === "kimi-code") return _parseKimiCode(blob);
+  return _parseLegacy(blob);
 };
 
 window.computeStats = function computeStats(events, metaEvents) {

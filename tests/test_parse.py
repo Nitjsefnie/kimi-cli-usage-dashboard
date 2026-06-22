@@ -155,6 +155,52 @@ def test_tool_use_unmatched_stays_null():
     assert out["tool_uses"][0]["is_error"] is None
 
 
+def test_kimi_code_usage_record_drives_record_and_turn():
+    """kimi-code usage.record is the primary cost/turn signal."""
+    out = parse.parse_file(
+        "sessions/projKC/sess-kc/wire.jsonl", _read("kimi_code.jsonl")
+    )
+    assert len(out["records"]) == 1
+    r = out["records"][0]
+    assert r["uuid"] == "sessions/projKC/sess-kc/wire.jsonl:5"
+    assert r["model"] == "kimi-k2-7-code"
+    assert r["fresh_tokens"] == 1000
+    assert r["cache_creation_tokens"] == 50
+    assert r["cache_read_tokens"] == 100
+    assert r["output_tokens"] == 200
+    assert r["ctx_input"] == 1150
+    assert r["text_chars"] == len("hello back")
+    assert r["reply_latency_s"] == pytest.approx(4.0, rel=1e-9)
+    expected_cost = pricing.compute_cost(
+        "kimi-k2-7-code",
+        fresh=1000, create=50, read=100, output=200,
+    )
+    assert r["cost_usd"] == pytest.approx(expected_cost, rel=1e-9)
+
+    assert len(out["ctx_turns"]) == 1
+    t = out["ctx_turns"][0]
+    assert t["input"] == 1150
+    assert t["output"] == 200
+    assert t["delta"] == 1150
+
+
+def test_kimi_code_tool_call_result_pairing():
+    out = parse.parse_file(
+        "sessions/projKC/sess-kc/wire.jsonl", _read("kimi_code.jsonl")
+    )
+    assert len(out["tool_uses"]) == 1
+    tu = out["tool_uses"][0]
+    assert tu["tool_name"] == "Bash"
+    assert tu["is_error"] is False
+
+
+def test_kimi_code_detection_does_not_misclassify_legacy():
+    """A legacy fixture must still be parsed as legacy."""
+    out = parse.parse_file("sessions/projA/sess-A/wire.jsonl", _read("single_turn.jsonl"))
+    assert len(out["records"]) == 1
+    assert out["records"][0]["uuid"] == "a1"
+
+
 def test_turn_begin_drives_turn_boundaries():
     """In Kimi wire format turns are bounded by TurnBegin/TurnEnd.
     Build a blob: turn 1 has two StatusUpdates, turn 2 has one.
