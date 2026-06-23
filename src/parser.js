@@ -1,6 +1,6 @@
 /**
  * In-browser wire.jsonl parser for the Inspector.
- * Mirrors backend/parse.py and ~/.kimi/scripts/parse_wire.py.
+ * Mirrors backend/parse.py and ~/.kimi-code/scripts/parse_wire.py.
  */
 
 window.PARSER_VERSION = "3";

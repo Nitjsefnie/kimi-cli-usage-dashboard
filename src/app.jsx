@@ -887,7 +887,7 @@ function SessionView({ tx, loadFile, loadFiles }) {
           <div className="drop-title">Drop a wire.jsonl transcript here</div>
           <div className="drop-sub">Drop several files (or a .zip of transcripts) to merge them into the dashboard. Files are parsed in your browser — nothing leaves the page.</div>
           <div className="drop-hints">
-            <span>~/.kimi/sessions/&lt;hash&gt;/&lt;session-uuid&gt;/wire.jsonl</span>
+            <span>~/.kimi-code/sessions/wd_&lt;workdir&gt;/&lt;session&gt;/agents/main/wire.jsonl</span>
           </div>
         </div>
       </div>
