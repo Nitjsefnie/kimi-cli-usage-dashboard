@@ -36,6 +36,10 @@ _ONLY_MODELS = ("kimi-k2-6", "kimi-k2-7-code")
 
 UNRESOLVED_PROJECT_ID = "<unresolved>"
 
+# Activity-heatmap timezone. Bound as a SQL parameter (never interpolated);
+# Postgres tzdata makes AT TIME ZONE fully DST-aware (CET/CEST transitions).
+HEATMAP_TZ = "Europe/Prague"
+
 
 def _unresolved_cond(prefix: str = "") -> str:
     """SQL boolean: this projects-row's display_name never resolved past the
@@ -183,6 +187,75 @@ async def tool_error_rate(
             {"ts": _iso(b), "model": m, "tool": t,
              "n_total": int(nt or 0), "n_error": int(ne or 0)}
             for (b, m, t, nt, ne) in rows
+        ],
+    }
+
+
+@router.get("/activity-heatmap")
+async def activity_heatmap(
+    range: str = Query("30d"),
+    project: str | None = Query(None),
+    model: str | None = Query(None),
+) -> dict:
+    """Weekday × hour activity grid in HEATMAP_TZ local wall-clock time.
+
+    dow is ISO (1=Mon … 7=Sun), hour 0–23. DST handled by Postgres
+    tzdata via AT TIME ZONE — UTC+1 in winter (CET), UTC+2 in summer
+    (CEST). Cross-file uuid dedup at read time, mirroring /api/dashboard
+    (SV-PARSER-SPEC). Unlike dashboard's dedup_body, the model filter is
+    applied to BOTH arms so uuid-less legacy rows also honour it."""
+    delta = _parse_range(range)
+    since = datetime.now(timezone.utc) - delta
+
+    filt_args: list[Any] = [since]
+    proj_filter = _proj_filter(project, filt_args)
+    model_filter = ""
+    if model:
+        model_filter = "AND r.model LIKE %s"
+        filt_args.append(f"%{model}%")
+    args = [HEATMAP_TZ, HEATMAP_TZ] + filt_args + filt_args
+
+    dedup_body = f"""
+      (SELECT DISTINCT ON (r.uuid) r.ts, r.output_tokens, r.cost_usd
+       FROM records r
+       JOIN files f ON f.file_key = r.file_key
+       WHERE r.ts >= %s {proj_filter} {model_filter} AND r.uuid IS NOT NULL
+       ORDER BY r.uuid, r.file_key)
+      UNION ALL
+      (SELECT r.ts, r.output_tokens, r.cost_usd
+       FROM records r
+       JOIN files f ON f.file_key = r.file_key
+       WHERE r.ts >= %s {proj_filter} {model_filter} AND r.uuid IS NULL)
+    """
+
+    with db.viz_conn() as c:
+        rows = c.execute(
+            f"""
+            SELECT EXTRACT(ISODOW FROM (d.ts AT TIME ZONE %s))::int AS dow,
+                   EXTRACT(HOUR   FROM (d.ts AT TIME ZONE %s))::int AS hour,
+                   COUNT(*)             AS requests,
+                   SUM(d.output_tokens) AS output_tokens,
+                   SUM(d.cost_usd)      AS cost_usd
+            FROM ({dedup_body}) d
+            WHERE d.ts IS NOT NULL
+            GROUP BY 1, 2
+            ORDER BY 1, 2
+            """,
+            args,
+        ).fetchall()
+
+    return {
+        "range": range,
+        "tz": HEATMAP_TZ,
+        "cells": [
+            {
+                "dow": int(dow),
+                "hour": int(hour),
+                "requests": int(n or 0),
+                "output_tokens": int(out or 0),
+                "cost_usd": float(cost or 0),
+            }
+            for (dow, hour, n, out, cost) in rows
         ],
     }
 
