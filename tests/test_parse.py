@@ -184,6 +184,44 @@ def test_kimi_code_usage_record_drives_record_and_turn():
     assert t["delta"] == 1150
 
 
+def test_kimi_code_raw_provider_model_is_coerced_by_date():
+    """kimi-code usage.record embeds the raw provider id; parse.py must
+    ignore it and assign the pricing model by first_event_ts.
+    """
+    out = parse.parse_file(
+        "sessions/projKC/sess-kc/wire.jsonl", _read("kimi_code_raw_model.jsonl")
+    )
+    assert len(out["records"]) == 1
+    r = out["records"][0]
+    assert r["model"] == "kimi-k2-7-code"
+    expected_cost = pricing.compute_cost(
+        "kimi-k2-7-code",
+        fresh=1000, create=50, read=100, output=200,
+    )
+    assert r["cost_usd"] == pytest.approx(expected_cost, rel=1e-9)
+
+
+def test_kimi_code_pre_cutoff_raw_provider_model_is_coerced_to_k2_6():
+    """A kimi-code wire whose first event is before MODEL_CUTOFF_EPOCH must
+    be labelled kimi-k2-6 regardless of the embedded usage.record model.
+    """
+    # metadata.created_at of 1780000000000 ms is well before MODEL_CUTOFF_EPOCH.
+    blob = (
+        b'{"type":"metadata","protocol_version":"1.4","created_at":1780000000000}\n'
+        b'{"type":"turn.prompt","time":1780000001000,"input":[{"type":"text","text":"Hello"}],"origin":{"kind":"user"}}\n'
+        b'{"type":"usage.record","time":1780000002000,"model":"kimi-code/kimi-for-coding","usage":{"inputOther":1000,"output":200,"inputCacheRead":100,"inputCacheCreation":50}}\n'
+    )
+    out = parse.parse_file("sessions/projKC/sess-old/wire.jsonl", blob)
+    assert len(out["records"]) == 1
+    r = out["records"][0]
+    assert r["model"] == "kimi-k2-6"
+    expected_cost = pricing.compute_cost(
+        "kimi-k2-6",
+        fresh=1000, create=50, read=100, output=200,
+    )
+    assert r["cost_usd"] == pytest.approx(expected_cost, rel=1e-9)
+
+
 def test_kimi_code_tool_call_result_pairing():
     out = parse.parse_file(
         "sessions/projKC/sess-kc/wire.jsonl", _read("kimi_code.jsonl")

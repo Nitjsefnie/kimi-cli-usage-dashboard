@@ -26,6 +26,16 @@ MODEL_CUTOFF_EPOCH = 1781217035
 MODEL_CUTOFF_DT = datetime.fromtimestamp(MODEL_CUTOFF_EPOCH, tz=timezone.utc)
 
 
+def _model_for(first_event_ts: datetime | None) -> str:
+    """Date-based model assignment — the ONLY accepted model source.
+    Wire-embedded model strings (e.g. 'kimi-code/kimi-for-coding') are
+    raw provider ids, not pricing models, and are deliberately ignored.
+    """
+    if first_event_ts is not None and first_event_ts < MODEL_CUTOFF_DT:
+        return "kimi-k2-6"
+    return "kimi-k2-7-code"
+
+
 def _to_dt(s: str | float | None):
     if not s:
         return None
@@ -169,10 +179,7 @@ def _parse_legacy(file_key: str, blob: bytes) -> dict:
 
             # Kimi wire format does not embed model per event; fall back to a
             # hardcoded time-based assignment using the session's first event.
-            if first_event_ts is not None and first_event_ts < MODEL_CUTOFF_DT:
-                model = "kimi-k2-6"
-            else:
-                model = "kimi-k2-7-code"
+            model = _model_for(first_event_ts)
             cost = pricing.compute_cost(
                 model,
                 fresh=fresh, create=create, read=read, output=output,
@@ -436,7 +443,6 @@ def _parse_kimi_code(file_key: str, blob: bytes) -> dict:
             continue
 
         if typ == "usage.record":
-            model = obj.get("model", "")
             usage = obj.get("usage") or {}
             fresh = int(usage.get("inputOther") or 0)
             create = int(usage.get("inputCacheCreation") or 0)
@@ -451,6 +457,7 @@ def _parse_kimi_code(file_key: str, blob: bytes) -> dict:
                     reply_latency_s = delta_s
             pending_turn_begin_ts = None
 
+            model = _model_for(first_event_ts)
             cost = pricing.compute_cost(
                 model,
                 fresh=fresh, create=create, read=read, output=output,
