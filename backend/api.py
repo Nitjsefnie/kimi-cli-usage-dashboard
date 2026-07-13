@@ -34,6 +34,31 @@ router = APIRouter(prefix="/api")
 # point promote model to a `tool_uses.model` column populated at parse time.
 _ONLY_MODELS = ("kimi-k2-6", "kimi-k2-7-code")
 
+UNRESOLVED_PROJECT_ID = "<unresolved>"
+
+
+def _unresolved_cond(prefix: str = "") -> str:
+    """SQL boolean: this projects-row's display_name never resolved past the
+    raw session hash (no project.json marker in R2 — a bare 12/32-hex id)."""
+    return (
+        f"{prefix}display_name = {prefix}project_id "
+        f"AND {prefix}project_id ~ '^([0-9a-f]{{12}}|[0-9a-f]{{32}})$'"
+    )
+
+
+def _proj_filter(project: str | None, args: list) -> str:
+    """SQL snippet filtering `files f` rows by project; appends bind params
+    to args. The UNRESOLVED_PROJECT_ID sentinel selects the whole
+    unresolved-hash group and binds NO params, so it stays correct in
+    queries that interpolate the snippet twice."""
+    if not project:
+        return ""
+    if project == UNRESOLVED_PROJECT_ID:
+        return ("AND f.project_id IN (SELECT project_id FROM projects "
+                f"WHERE {_unresolved_cond()})")
+    args.append(project)
+    return "AND f.project_id = %s"
+
 
 @router.get("/me")
 async def me(request: Request) -> dict:
@@ -72,10 +97,7 @@ async def tool_usage(
     if model and not any(m in model for m in _ONLY_MODELS):
         return {"range": range, "project": project, "bucket_s": bucket_s, "buckets": []}
     args: list[Any] = [since]
-    proj_filter = ""
-    if project:
-        proj_filter = "AND f.project_id = %s"
-        args.append(project)
+    proj_filter = _proj_filter(project, args)
 
     with db.viz_conn() as c:
         rows = c.execute(
@@ -130,10 +152,7 @@ async def tool_error_rate(
     if model and not any(m in model for m in _ONLY_MODELS):
         return {"range": range, "project": project, "bucket_s": bucket_s, "buckets": []}
     args: list[Any] = [since]
-    proj_filter = ""
-    if project:
-        proj_filter = "AND f.project_id = %s"
-        args.append(project)
+    proj_filter = _proj_filter(project, args)
 
     with db.viz_conn() as c:
         rows = c.execute(
@@ -182,16 +201,13 @@ async def reply_latency(
     delta = _parse_range(range)
     since = datetime.now(timezone.utc) - delta
     bucket_s = _bucket_seconds(delta)
-    proj_filter = ""
     args: list[Any] = []
     if model:
         # JOIN happens at the records level via the WHERE clause; no
         # separate join arg needed since records IS the source.
         pass
     args.append(since)
-    if project:
-        proj_filter = "AND f.project_id = %s"
-        args.append(project)
+    proj_filter = _proj_filter(project, args)
     model_filter = ""
     if model:
         model_filter = "AND r.model LIKE %s"
@@ -366,17 +382,20 @@ async def list_models() -> dict:
 async def list_projects() -> dict:
     """Per-project rollup: file_count, total_cost, derived from files+records."""
     with db.viz_conn() as c:
+        cond = _unresolved_cond("p.")
         rows = c.execute(
-            """
-            SELECT p.project_id,
-                   p.display_name,
+            f"""
+            SELECT CASE WHEN {cond} THEN '<unresolved>'
+                        ELSE p.project_id END   AS project_id,
+                   CASE WHEN {cond} THEN '<unresolved>'
+                        ELSE p.display_name END AS display_name,
                    COUNT(DISTINCT f.session_id) AS session_count,
                    COUNT(f.file_key)            AS file_count,
                    COALESCE(SUM(r.cost_usd), 0) AS total_cost
             FROM projects p
             LEFT JOIN files f   ON f.project_id = p.project_id
             LEFT JOIN records r ON r.file_key   = f.file_key
-            GROUP BY p.project_id, p.display_name
+            GROUP BY 1, 2
             ORDER BY total_cost DESC
             """
         ).fetchall()
@@ -455,12 +474,9 @@ async def cache_view(
     """
     delta = _parse_range(range)
     since = datetime.now(timezone.utc) - delta
-    proj_filter = ""
     model_filter = ""
     leg_args: list[Any] = [since]
-    if project:
-        proj_filter = "AND f.project_id = %s"
-        leg_args.append(project)
+    proj_filter = _proj_filter(project, leg_args)
     if model:
         model_filter = "AND r.model LIKE %s"
         leg_args.append(f"%{model}%")
@@ -611,11 +627,8 @@ async def context_growth_agg(
     Returns mean, p50, p90, p99, max, n for both."""
     delta = _parse_range(range)
     since = datetime.now(timezone.utc) - delta
-    proj_filter = ""
     args: list[Any] = [since]
-    if project:
-        proj_filter = "AND f.project_id = %s"
-        args.append(project)
+    proj_filter = _proj_filter(project, args)
 
     with db.viz_conn() as c:
         per_turn = c.execute(
@@ -801,12 +814,9 @@ async def dashboard(
     delta = _parse_range(range)
     since = datetime.now(timezone.utc) - delta
     bucket_s = _bucket_seconds(delta)
-    proj_filter = ""
     model_filter = ""
     leg_args: list[Any] = [since]
-    if project:
-        proj_filter = "AND f.project_id = %s"
-        leg_args.append(project)
+    proj_filter = _proj_filter(project, leg_args)
     if model:
         model_filter = "AND r.model LIKE %s"
         leg_args.append(f"%{model}%")
@@ -1264,11 +1274,8 @@ async def list_sessions(
     0 because the new schema doesn't track rate-limit hits per-session
     (the OLD column came from a removed join).
     """
-    proj_filter = ""
     args: list[Any] = []
-    if project:
-        proj_filter = "AND f.project_id = %s"
-        args.append(project)
+    proj_filter = _proj_filter(project, args)
 
     cursor_clause = ""
     if cursor:

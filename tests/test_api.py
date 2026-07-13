@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import tempfile
@@ -9,13 +10,12 @@ from fastapi.testclient import TestClient
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-@pytest.fixture
-def app_with_data(monkeypatch):
-    """Spin up a fresh DB + mini R2, ingest, return an authed TestClient.
+def _build_app(monkeypatch, pre_ingest=None, test_db="kimi_viz_test_api"):
+    """Spin up a fresh DB + mini R2, optionally mutate the temp R2 tree,
+    ingest, and return a TestClient plus cleanup metadata.
 
     Bypasses auth via a clean FastAPI app with only the api router.
     """
-    test_db = "kimi_viz_test_api"
     os.system(f"dropdb --if-exists {test_db} 2>/dev/null")
     os.system(f"createdb {test_db} 2>/dev/null")
     os.system(f"psql {test_db} -f {_REPO_ROOT / 'backend/schema.sql'} >/dev/null")
@@ -24,6 +24,9 @@ def app_with_data(monkeypatch):
     tmp = tempfile.mkdtemp(prefix="kd-api-")
     shutil.copytree(src, Path(tmp) / "r2")
     monkeypatch.setenv("R2_ENDPOINT", f"file://{tmp}/r2/")
+
+    if pre_ingest is not None:
+        pre_ingest(Path(tmp) / "r2")
 
     from backend import db as _db
     if _db._VIZ is not None:
@@ -41,8 +44,11 @@ def app_with_data(monkeypatch):
     a = FastAPI()
     a.include_router(api_mod.router)
 
-    yield TestClient(a)
+    return TestClient(a), tmp, test_db
 
+
+def _cleanup_app(tmp, test_db):
+    from backend import db as _db
     if _db._VIZ is not None:
         try:
             _db._VIZ.close()
@@ -51,6 +57,49 @@ def app_with_data(monkeypatch):
     _db._VIZ = None
     shutil.rmtree(tmp)
     os.system(f"dropdb --if-exists {test_db} 2>/dev/null")
+
+
+@pytest.fixture
+def app_with_data(monkeypatch):
+    client, tmp, test_db = _build_app(monkeypatch)
+    yield client
+    _cleanup_app(tmp, test_db)
+
+
+@pytest.fixture
+def app_with_unresolved(monkeypatch):
+    """Plain fixture plus two junk hash-projects (no project.json marker).
+
+    One 32-hex legacy md5 id and one 12-hex kimi-code workdir hash id,
+    each with a distinct session dir so session_count sees 2.
+    """
+    def _inject_junk(r2_root: Path):
+        src_wire = (
+            _REPO_ROOT
+            / "fixtures/r2_mini/kimi/sessions/projB/sess-C/subagents/agent-aaaa/wire.jsonl"
+        )
+        template = src_wire.read_text()
+        junk = [
+            ("0123456789abcdef0123456789abcdef", "test1", "unresolved-uuid-32"),
+            ("abcdef012345", "test2", "unresolved-uuid-12"),
+        ]
+        for project_id, session_id, uuid in junk:
+            wire = template.replace('"shared-uuid-1"', f'"{uuid}"')
+            dest = (
+                r2_root
+                / "kimi/sessions"
+                / project_id
+                / session_id
+                / "subagents/agent-x/wire.jsonl"
+            )
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(wire)
+
+    client, tmp, test_db = _build_app(
+        monkeypatch, pre_ingest=_inject_junk, test_db="kimi_viz_test_unres"
+    )
+    yield client
+    _cleanup_app(tmp, test_db)
 
 
 def test_projects(app_with_data):
@@ -211,3 +260,48 @@ def test_tool_error_rate_returns_expected_shape(app_with_data):
     for b in body["buckets"]:
         assert {"ts", "model", "tool", "n_total", "n_error"} <= set(b.keys())
         assert b["n_error"] <= b["n_total"]
+
+
+def test_projects_groups_unresolved(app_with_unresolved):
+    r = app_with_unresolved.get("/api/projects")
+    assert r.status_code == 200
+    body = r.json()
+    pids = sorted(p["project_id"] for p in body["projects"])
+    assert pids == ["<unresolved>", "projA", "projB"]
+    unresolved = next(p for p in body["projects"] if p["project_id"] == "<unresolved>")
+    assert unresolved["display_name"] == "<unresolved>"
+    assert unresolved["session_count"] == 2
+
+
+def test_unresolved_filter_scopes_queries(app_with_unresolved):
+    r_all = app_with_unresolved.get("/api/cache?range=3650d")
+    assert r_all.status_code == 200
+    all_total = r_all.json()["session_total"]
+
+    r_unres = app_with_unresolved.get(
+        "/api/cache", params={"range": "3650d", "project": "<unresolved>"}
+    )
+    assert r_unres.status_code == 200
+    unres_total = r_unres.json()["session_total"]
+    assert unres_total["turns"] > 0
+    assert unres_total["cost_total"] > 0
+    assert unres_total["turns"] < all_total["turns"]
+    assert unres_total["cost_total"] < all_total["cost_total"]
+
+    # Junk hash-projects must not leak into a normal project's filtered numbers.
+    # These are the documented projB totals under the plain fixture.
+    r_projB = app_with_unresolved.get(
+        "/api/cache", params={"range": "3650d", "project": "projB"}
+    )
+    projB_total = r_projB.json()["session_total"]
+    assert projB_total["turns"] == 2
+    assert projB_total["fresh"] == 1050
+    assert projB_total["output"] == 525
+    assert projB_total["cost_total"] == 0.0031
+
+
+def test_projects_unaffected_without_junk(app_with_data):
+    r = app_with_data.get("/api/projects")
+    assert r.status_code == 200
+    pids = [p["project_id"] for p in r.json()["projects"]]
+    assert "<unresolved>" not in pids
