@@ -3,19 +3,25 @@
  * Mirrors backend/parse.py and ~/.kimi-code/scripts/parse_wire.py.
  */
 
-window.PARSER_VERSION = "3";
+// Must match backend PARSER_VERSION (see backend/.env.example).
+window.PARSER_VERSION = "4";
 
 const MODEL_RATES = {
+  "kimi-k3":        { fresh: 3.00, create: 0.00, read: 0.30, output: 15.00 },
   "kimi-k2-7-code": { fresh: 0.95, create: 0.00, read: 0.19, output: 4.00 },
   "kimi-k2-6":      { fresh: 0.95, create: 0.00, read: 0.16, output: 4.00 },
 };
 
 const DEFAULT_RATES = MODEL_RATES["kimi-k2-6"];
 
-// Hardcoded model transition.  Anchor = now - 12h; effective cutoff =
-// anchor - 12h.  Sessions whose first event is strictly before this UTC
-// epoch are labelled kimi-k2-6, everything else is kimi-k2-7-code.
-const MODEL_CUTOFF_EPOCH = 1781217035;
+// Hardcoded model transitions, oldest first.  Each constant is a frozen UTC
+// epoch, NOT a live expression.  Boundaries are strictly-before /
+// inclusive-at, so each cutoff instant belongs to the NEWER model:
+//   < MODEL_CUTOFF_EPOCH -> kimi-k2-6
+//   < K3_CUTOFF_EPOCH    -> kimi-k2-7-code
+//   >=K3_CUTOFF_EPOCH    -> kimi-k3
+const MODEL_CUTOFF_EPOCH = 1781217035;  // 2026-06-11 22:30:35 UTC
+const K3_CUTOFF_EPOCH = 1784214394;     // 2026-07-16 15:06:34 UTC
 
 function tsToEpoch(ts) {
   if (ts == null) return null;
@@ -24,10 +30,15 @@ function tsToEpoch(ts) {
   return isNaN(d.getTime()) ? null : d.getTime() / 1000;
 }
 
+// Mirrors backend/parse.py _model_for, including the no-timestamp fallback to
+// kimi-k2-7-code (an unstamped session is already-ingested history, so it
+// cannot postdate the K3 cutoff, and K3's rates are ~3x higher).
 function modelForSession(firstEventTs) {
   const epoch = tsToEpoch(firstEventTs);
   if (epoch == null) return "kimi-k2-7-code";
-  return epoch < MODEL_CUTOFF_EPOCH ? "kimi-k2-6" : "kimi-k2-7-code";
+  if (epoch < MODEL_CUTOFF_EPOCH) return "kimi-k2-6";
+  if (epoch < K3_CUTOFF_EPOCH) return "kimi-k2-7-code";
+  return "kimi-k3";
 }
 
 window.rateForModel = function rateForModel(model) {

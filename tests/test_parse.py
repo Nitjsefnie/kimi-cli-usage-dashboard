@@ -8,6 +8,7 @@ Each parse_file call returns:
 Cross-file uuid dedup is a query-time concern, not here.
 Cost is precomputed per record using pricing.MODEL_RATES.
 """
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,19 @@ FIX = Path(__file__).resolve().parents[1] / "fixtures" / "parser"
 
 def _read(name):
     return (FIX / name).read_bytes()
+
+
+def _status_update_at(epoch: float) -> bytes:
+    """One classic-wire StatusUpdate line stamped at `epoch` (UTC)."""
+    ts = datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat().replace(
+        "+00:00", "Z"
+    )
+    return (
+        '{"timestamp": "%s", "message": {"type": "StatusUpdate", "payload": '
+        '{"message_id": "m1", "token_usage": {"input_other": 400, '
+        '"input_cache_creation": 100, "input_cache_read": 200, '
+        '"output": 50}}}}\n' % ts
+    ).encode()
 
 
 def test_single_turn_emits_one_record_one_turn():
@@ -96,6 +110,76 @@ def test_pre_cutoff_timestamp_labels_k2_6():
     expected_cost = pricing.compute_cost(
         "kimi-k2-6",
         fresh=1000, create=0, read=1000, output=1000,
+    )
+    assert r["cost_usd"] == pytest.approx(expected_cost, rel=1e-9)
+
+
+def test_at_k3_cutoff_labels_k3():
+    """The K3 cutoff is inclusive: a first event exactly at K3_CUTOFF_EPOCH
+    is kimi-k3, mirroring the k2-6 boundary's strictly-before rule.
+    """
+    out = parse.parse_file(
+        "sessions/projA/sess-k3/wire.jsonl",
+        _status_update_at(parse.K3_CUTOFF_EPOCH),
+    )
+    assert out["records"][0]["model"] == "kimi-k3"
+
+
+def test_one_second_before_k3_cutoff_still_labels_k2_7_code():
+    out = parse.parse_file(
+        "sessions/projA/sess-k27/wire.jsonl",
+        _status_update_at(parse.K3_CUTOFF_EPOCH - 1),
+    )
+    assert out["records"][0]["model"] == "kimi-k2-7-code"
+
+
+def test_post_k3_cutoff_cost_uses_k3_rates():
+    out = parse.parse_file(
+        "sessions/projA/sess-k3b/wire.jsonl",
+        _status_update_at(parse.K3_CUTOFF_EPOCH + 3600),
+    )
+    r = out["records"][0]
+    assert r["model"] == "kimi-k3"
+    expected_cost = pricing.compute_cost(
+        "kimi-k3",
+        fresh=400, create=100, read=200, output=50,
+    )
+    assert r["cost_usd"] == pytest.approx(expected_cost, rel=1e-9)
+
+
+def test_missing_timestamp_still_labels_k2_7_code():
+    """A session with no usable timestamp must NOT drift to the newest label.
+    It predates the K3 cutoff by construction (it is already ingested), so it
+    stays kimi-k2-7-code rather than being repriced at K3's much higher rates.
+    """
+    blob = (
+        b'{"message": {"type": "StatusUpdate", "payload": {"message_id": "n1", '
+        b'"token_usage": {"input_other": 400, "input_cache_creation": 100, '
+        b'"input_cache_read": 200, "output": 50}}}}\n'
+    )
+    out = parse.parse_file("sessions/projA/sess-nots/wire.jsonl", blob)
+    assert out["records"][0]["model"] == "kimi-k2-7-code"
+
+
+def test_kimi_code_post_k3_cutoff_is_coerced_to_k3():
+    """kimi-code wires take the date-based label too — the embedded raw
+    provider id stays ignored across the K3 boundary.
+    """
+    ms = int((parse.K3_CUTOFF_EPOCH + 10) * 1000)
+    blob = (
+        b'{"type":"metadata","protocol_version":"1.4","created_at":%d}\n'
+        b'{"type":"turn.prompt","time":%d,"input":[{"type":"text","text":"Hi"}],'
+        b'"origin":{"kind":"user"}}\n'
+        b'{"type":"usage.record","time":%d,"model":"kimi-code/kimi-for-coding",'
+        b'"usage":{"inputOther":1000,"output":200,"inputCacheRead":100,'
+        b'"inputCacheCreation":50}}\n'
+    ) % (ms, ms + 1000, ms + 2000)
+    out = parse.parse_file("sessions/projKC/sess-k3/wire.jsonl", blob)
+    r = out["records"][0]
+    assert r["model"] == "kimi-k3"
+    expected_cost = pricing.compute_cost(
+        "kimi-k3",
+        fresh=1000, create=50, read=100, output=200,
     )
     assert r["cost_usd"] == pytest.approx(expected_cost, rel=1e-9)
 

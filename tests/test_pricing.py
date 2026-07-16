@@ -16,6 +16,25 @@ def test_k2_6_rates_match_source():
     assert r == {"fresh": 0.95, "create": 0.00, "read": 0.16, "output": 4.00}
 
 
+def test_k3_rates_match_source():
+    r = pricing.rate_for("kimi-k3")
+    assert r == {"fresh": 3.00, "create": 0.00, "read": 0.30, "output": 15.00}
+
+
+def test_k3_does_not_fall_through_to_default_rates():
+    """kimi-k3 shares no substring with the k2 keys, so a missing table entry
+    would silently bill it at DEFAULT_RATES (k2-6) — ~1/3 of its real cost.
+    """
+    assert pricing.rate_for("kimi-k3") is not pricing.DEFAULT_RATES
+
+
+def test_k3_is_pricier_than_k2_on_every_billed_bucket():
+    k3 = pricing.MODEL_RATES["kimi-k3"]
+    k2 = pricing.MODEL_RATES["kimi-k2-7-code"]
+    for bucket in ("fresh", "read", "output"):
+        assert k3[bucket] > k2[bucket]
+
+
 def test_unknown_model_falls_back_to_default():
     r = pricing.rate_for("not-a-real-model")
     assert r == pricing.DEFAULT_RATES

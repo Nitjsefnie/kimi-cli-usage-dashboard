@@ -18,22 +18,38 @@ import orjson
 
 from backend import pricing
 
-# Hardcoded model transition.  The anchor is "now - 12h"; the effective
-# cutoff is "anchor - 12h".  Sessions whose first event is strictly
-# before this UTC epoch are labelled kimi-k2-6, everything else (including
-# sessions with no usable timestamp) is labelled kimi-k2-7-code.
-MODEL_CUTOFF_EPOCH = 1781217035
+# Hardcoded model transitions, oldest first.  Each constant is a frozen UTC
+# epoch, NOT a live expression — a session is labelled by which interval its
+# first event falls into:
+#
+#   first_event_ts <  MODEL_CUTOFF_EPOCH   -> kimi-k2-6
+#   first_event_ts <  K3_CUTOFF_EPOCH      -> kimi-k2-7-code
+#   first_event_ts >= K3_CUTOFF_EPOCH      -> kimi-k3
+#
+# Boundaries are strictly-before / inclusive-at, so each cutoff instant
+# belongs to the NEWER model.
+MODEL_CUTOFF_EPOCH = 1781217035   # 2026-06-11 22:30:35 UTC  k2-6      -> k2-7-code
+K3_CUTOFF_EPOCH = 1784214394      # 2026-07-16 15:06:34 UTC  k2-7-code -> k3
 MODEL_CUTOFF_DT = datetime.fromtimestamp(MODEL_CUTOFF_EPOCH, tz=timezone.utc)
+K3_CUTOFF_DT = datetime.fromtimestamp(K3_CUTOFF_EPOCH, tz=timezone.utc)
 
 
 def _model_for(first_event_ts: datetime | None) -> str:
     """Date-based model assignment — the ONLY accepted model source.
     Wire-embedded model strings (e.g. 'kimi-code/kimi-for-coding') are
     raw provider ids, not pricing models, and are deliberately ignored.
+
+    A session with no usable timestamp falls back to kimi-k2-7-code, NOT the
+    newest label: an unstamped session is already-ingested history, so it
+    cannot postdate the K3 cutoff, and K3's rates are ~3x higher.
     """
-    if first_event_ts is not None and first_event_ts < MODEL_CUTOFF_DT:
+    if first_event_ts is None:
+        return "kimi-k2-7-code"
+    if first_event_ts < MODEL_CUTOFF_DT:
         return "kimi-k2-6"
-    return "kimi-k2-7-code"
+    if first_event_ts < K3_CUTOFF_DT:
+        return "kimi-k2-7-code"
+    return "kimi-k3"
 
 
 def _to_dt(s: str | float | None):
