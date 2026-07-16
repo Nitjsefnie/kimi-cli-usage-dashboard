@@ -10,9 +10,9 @@
     `/api/cache`, `/api/context-growth/{agg,session}`, `/api/sessions*`,
     `/api/events` SSE).
   - `parse.py` — wire.jsonl → records + ctx_turns. Mirrors
-    the canonical `~/.kimi/scripts/parse_wire.py` for turn-based
+    the canonical `~/.kimi-code/scripts/parse_wire.py` for turn-based
     StatusUpdate extraction.
-  - `pricing.py` — single source of truth for Kimi K2.6 / K2.7 Code rates.
+  - `pricing.py` — single source of truth for Kimi K2.6 / K2.7 Code / K3 rates.
     Bump `PARSER_VERSION` in `.env` whenever this changes.
   - `ingest.py` — R2 walk, etag/parser-version reparse decision, persistence
     in two-phase transactions, broadcasts `ingest_done` SSE on success.
@@ -41,7 +41,7 @@
   - `dashboard-charts.jsx`, `dashboard-charts-extra.jsx` — SVG panels.
   - `views/` — `cache-view.jsx`, `context-growth-view-v2.jsx`.
 
-- `scripts/` — symlinks to canonical `~/.kimi/scripts/*.py`. **Read-only**;
+- `scripts/` — symlinks to canonical `~/.kimi-code/scripts/*.py`. **Read-only**;
   the web app does NOT invoke them at runtime.
 
 - `tests/` — pytest suite.
@@ -57,7 +57,7 @@
 - **Cross-file uuid dedup happens at READ time** via `DISTINCT ON (uuid)`
   in `/api/dashboard`, `/api/cache`, etc. There is no persisted Phase 2
   rollup table.
-- **Don't invoke `~/.kimi/scripts/parse_wire.py`** at runtime, and
+- **Don't invoke `~/.kimi-code/scripts/parse_wire.py`** at runtime, and
   don't edit it from this repo. If the canonical Python and our port
   drift, fix it here, not there.
 - **Tests use fixtures, not real R2.** The R2 client supports
