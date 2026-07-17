@@ -175,6 +175,16 @@ def test_model_for_kimi_for_coding_never_becomes_k3():
     assert parse._model_for("kimi-code/kimi-for-coding", ts) == "kimi-k2-7-code"
 
 
+def test_model_for_unrecognized_wire_id_is_never_promoted_to_k3():
+    """An unrecognized id that is PRESENT is not the "no model string" case
+    that justifies the date ladder's k3 rung. Bill it conservatively: a wrong
+    k2-7-code undercount beats a wrong k3 overcount at ~3x.
+    """
+    ts = datetime.fromtimestamp(parse.K3_CUTOFF_EPOCH + 86400, tz=timezone.utc)
+    assert parse._model_for("kimi-code/k4-future", ts) == "kimi-k2-7-code"
+    assert parse._model_for("garbage", ts) == "kimi-k2-7-code"
+
+
 def test_model_for_kimi_for_coding_uses_model_cutoff_for_the_k2_era():
     before = datetime.fromtimestamp(parse.MODEL_CUTOFF_EPOCH - 1, tz=timezone.utc)
     at = datetime.fromtimestamp(parse.MODEL_CUTOFF_EPOCH, tz=timezone.utc)

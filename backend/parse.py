@@ -31,6 +31,11 @@ from backend import pricing
 #   - "kimi-for-coding" spans BOTH k2.6 and k2.7-code — the branding did not
 #     change at that transition — so only a date can separate those two.
 #
+# MODEL_CUTOFF applies to any record the wire did not settle; K3_CUTOFF applies
+# ONLY to records with no wire model string at all. A model string that is
+# present but unrecognized is not the "no model string" case, so it never
+# reaches the k3 rung — see _model_for.
+#
 # Boundaries are strictly-before / inclusive-at, so each cutoff instant
 # belongs to the NEWER model.
 MODEL_CUTOFF_EPOCH = 1781217035   # 2026-06-11 22:30:35 UTC  k2-6 -> k2-7-code
@@ -43,9 +48,6 @@ K3_CUTOFF_DT = datetime.fromtimestamp(K3_CUTOFF_EPOCH, tz=timezone.utc)
 # Raw provider id -> canonical pricing label. Only ids that identify a pricing
 # model on their own belong here; "kimi-for-coding" deliberately does not.
 _WIRE_MODEL_MAP = {"k3": "kimi-k3"}
-
-# Raw provider ids that name a real model but cannot pin a pricing label alone.
-_AMBIGUOUS_WIRE_MODELS = frozenset({"kimi-for-coding"})
 
 
 def _canonical_model(wire_model: str | None) -> str | None:
@@ -68,9 +70,13 @@ def _model_for(wire_model: str | None, ts: datetime | None) -> str:
     the wire cannot express. Resolved per-record, not per-session: a session
     can switch model mid-flight (observed: kimi-for-coding -> k3, 24s apart).
 
-    A record with no usable timestamp falls back to kimi-k2-7-code, NOT the
-    newest label: an unstamped record is already-ingested history, so it cannot
-    postdate the K3 cutoff, and K3's rates are ~3x higher.
+    Unknowns resolve conservatively, never to the newest label, because K3's
+    rates are ~3x higher and a wrong undercount beats a wrong overcount:
+      - No usable timestamp -> kimi-k2-7-code. An unstamped record is
+        already-ingested history, so it cannot postdate the K3 cutoff.
+      - A model string that is present but unrecognized -> the k2 rungs only.
+        It is not the "transcript carries no model string" case that justifies
+        the date ladder's k3 rung, so the date must not promote it to k3.
     """
     canonical = _canonical_model(wire_model)
     if canonical is not None:
@@ -82,9 +88,10 @@ def _model_for(wire_model: str | None, ts: datetime | None) -> str:
     if ts < MODEL_CUTOFF_DT:
         return "kimi-k2-6"
 
-    # An ambiguous id names a real, non-k3 model: the date only separates the
-    # k2 generations, and must never promote it to k3.
-    if wire_model and wire_model.rsplit("/", 1)[-1] in _AMBIGUOUS_WIRE_MODELS:
+    # The wire named a model and it is not k3 (else _canonical_model caught
+    # it), so the date may only separate the k2 generations — never promote
+    # to k3.
+    if wire_model:
         return "kimi-k2-7-code"
 
     if ts < K3_CUTOFF_DT:
