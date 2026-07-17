@@ -31,6 +31,8 @@ const COL = {
 // Kimi model palette — the fork shipped with the Claude model keys,
 // so every kimi-* model fell through to the gray #888 fallback.
 const MODEL_COLORS = {
+  'kimi-k3':         'oklch(0.78 0.17 330)',  // magenta — top tier
+  'kimi-k2-7-code':  'oklch(0.75 0.15 25)',   // coral
   'kimi-k2-6':       'oklch(0.78 0.14 175)',  // teal — matches --accent
   'kimi-for-coding': 'oklch(0.78 0.14 245)',  // blue
   'kimi-k2':         'oklch(0.72 0.16 305)',  // violet
