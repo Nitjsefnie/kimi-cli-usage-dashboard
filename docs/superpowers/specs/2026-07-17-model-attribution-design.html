@@ -589,7 +589,8 @@
 
     <section id="s6">
       <div class="sec-head"><span class="num">06</span><h2>Test changes</h2></div>
-      <p class="sec-intro">Two existing tests encode the bug and must be inverted; seven new cases pin the new behavior.</p>
+      <p class="sec-intro">One existing test encodes the bug and must be inverted; two more keep their
+        assertions but carry false rationales; seven new cases pin the new behavior.</p>
       <div class="tbl-wrap">
       <table class="tbl">
         <thead><tr><th>Test</th><th>Action</th><th>Rationale</th></tr></thead>
@@ -601,8 +602,13 @@
           </tr>
           <tr>
             <td class="slate">test_kimi_code_raw_provider_model_is_coerced_by_date</td>
-            <td>Invert</td>
-            <td>Asserts the wire string is ignored. The wire string is now authoritative.</td>
+            <td>Rename</td>
+            <td>Assertion survives — fixture is stamped <code>2026-07-02</code>, between the cutoffs, so rule 2 reaches <code>kimi-k2-7-code</code> anyway. Only the "wire string is ignored" rationale is now false.</td>
+          </tr>
+          <tr>
+            <td class="slate">test_kimi_code_pre_cutoff_raw_provider_model_is_coerced_to_k2_6</td>
+            <td>Rename</td>
+            <td>Assertion survives — <code>kimi-for-coding</code> before <code>MODEL_CUTOFF</code> → rule 2 → <code>kimi-k2-6</code>. Fix the "regardless of the embedded model" rationale.</td>
           </tr>
           <tr><td class="slate">new · k3 before cutoff</td><td>Add</td><td><code>kimi-code/k3</code> before <code>K3_CUTOFF</code> → <code>kimi-k3</code> (finding 2).</td></tr>
           <tr><td class="slate">new · k2.7 after cutoff</td><td>Add</td><td><code>kimi-for-coding</code> after <code>K3_CUTOFF</code> → <code>kimi-k2-7-code</code> (the reported bug).</td></tr>

@@ -102,13 +102,28 @@ This is a parse-algorithm change, so every `files` row must be invalidated.
 
 ### `tests/test_parse.py`
 
-Two existing tests **encode the bug** and must be inverted:
+One existing test **encodes the bug** and must be inverted:
 
 - `test_kimi_code_post_k3_cutoff_is_coerced_to_k3` — asserts a wire record
   saying `kimi-for-coding` after the cutoff bills as k3. This *is* the reported
-  bug. Invert: it must stay `kimi-k2-7-code`.
-- `test_kimi_code_raw_provider_model_is_coerced_by_date` — asserts the wire
-  string is ignored. Invert: the wire string is authoritative.
+  bug. Invert: it must stay `kimi-k2-7-code`, at k2-7 rates.
+
+Two more keep their **assertions** but their names/docstrings become false and
+must be corrected (verified: their fixtures are stamped between the cutoffs, so
+the new ladder reaches the same label by a different route):
+
+- `test_kimi_code_raw_provider_model_is_coerced_by_date` — fixture is stamped
+  `2026-07-02`; wire says `kimi-for-coding` → rule 2 → `kimi-k2-7-code`. Same
+  answer. Rename to reflect that the wire string is now honored, not ignored.
+- `test_kimi_code_pre_cutoff_raw_provider_model_is_coerced_to_k2_6` — wire says
+  `kimi-for-coding` before `MODEL_CUTOFF` → rule 2 → `kimi-k2-6`. Same answer;
+  fix the "regardless of the embedded model" rationale.
+
+Note: `fixtures/parser/kimi_code.jsonl` carries `"model":"kimi-k2-7-code"` — a
+canonical label, not a real provider id. No such string exists in the wild. It
+is unrecognized by the ladder and falls to rule 3 (dates), which yields the same
+label, so the test passes unchanged. Left as-is deliberately; rule 3 is exactly
+the right home for an unrecognized string.
 
 New tests required:
 
