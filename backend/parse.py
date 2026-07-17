@@ -18,36 +18,76 @@ import orjson
 
 from backend import pricing
 
-# Hardcoded model transitions, oldest first.  Each constant is a frozen UTC
-# epoch, NOT a live expression — a session is labelled by which interval its
-# first event falls into:
+# Model attribution, oldest first. Each constant is a frozen UTC epoch, NOT a
+# live expression.
 #
-#   first_event_ts <  MODEL_CUTOFF_EPOCH   -> kimi-k2-6
-#   first_event_ts <  K3_CUTOFF_EPOCH      -> kimi-k2-7-code
-#   first_event_ts >= K3_CUTOFF_EPOCH      -> kimi-k3
+# The wire is the primary source: a kimi-code usage.record carries the provider
+# id (e.g. "kimi-code/k3") on the record that becomes a billing row, so it is
+# authoritative when it names a model unambiguously.
+#
+# Dates are the fallback, needed for two real cases the wire cannot express:
+#   - Legacy-format transcripts carry NO model string at all (and are still
+#     being produced).
+#   - "kimi-for-coding" spans BOTH k2.6 and k2.7-code — the branding did not
+#     change at that transition — so only a date can separate those two.
 #
 # Boundaries are strictly-before / inclusive-at, so each cutoff instant
 # belongs to the NEWER model.
-MODEL_CUTOFF_EPOCH = 1781217035   # 2026-06-11 22:30:35 UTC  k2-6      -> k2-7-code
-K3_CUTOFF_EPOCH = 1784214394      # 2026-07-16 15:06:34 UTC  k2-7-code -> k3
+MODEL_CUTOFF_EPOCH = 1781217035   # 2026-06-11 22:30:35 UTC  k2-6 -> k2-7-code
+K3_CUTOFF_EPOCH = 1784213155      # 2026-07-16 14:45:55 UTC  earliest observed
+                                  # k3 usage.record; only applies to records
+                                  # with no wire model string.
 MODEL_CUTOFF_DT = datetime.fromtimestamp(MODEL_CUTOFF_EPOCH, tz=timezone.utc)
 K3_CUTOFF_DT = datetime.fromtimestamp(K3_CUTOFF_EPOCH, tz=timezone.utc)
 
+# Raw provider id -> canonical pricing label. Only ids that identify a pricing
+# model on their own belong here; "kimi-for-coding" deliberately does not.
+_WIRE_MODEL_MAP = {"k3": "kimi-k3"}
 
-def _model_for(first_event_ts: datetime | None) -> str:
-    """Date-based model assignment — the ONLY accepted model source.
-    Wire-embedded model strings (e.g. 'kimi-code/kimi-for-coding') are
-    raw provider ids, not pricing models, and are deliberately ignored.
+# Raw provider ids that name a real model but cannot pin a pricing label alone.
+_AMBIGUOUS_WIRE_MODELS = frozenset({"kimi-for-coding"})
 
-    A session with no usable timestamp falls back to kimi-k2-7-code, NOT the
-    newest label: an unstamped session is already-ingested history, so it
-    cannot postdate the K3 cutoff, and K3's rates are ~3x higher.
+
+def _canonical_model(wire_model: str | None) -> str | None:
+    """Raw provider id -> canonical pricing label, or None if the wire cannot
+    settle it alone (ambiguous id, unrecognized id, or no id at all).
+
+    Only canonical labels may reach pricing.compute_cost: pricing.rate_for
+    matches by substring, so a raw "kimi-code/k3" would match no key and
+    silently bill at DEFAULT_RATES (k2-6) — a ~3x undercount.
     """
-    if first_event_ts is None:
+    if not wire_model:
+        return None
+    return _WIRE_MODEL_MAP.get(wire_model.rsplit("/", 1)[-1])
+
+
+def _model_for(wire_model: str | None, ts: datetime | None) -> str:
+    """Pricing model for ONE billing record.
+
+    The wire wins when it names a model unambiguously; dates decide only what
+    the wire cannot express. Resolved per-record, not per-session: a session
+    can switch model mid-flight (observed: kimi-for-coding -> k3, 24s apart).
+
+    A record with no usable timestamp falls back to kimi-k2-7-code, NOT the
+    newest label: an unstamped record is already-ingested history, so it cannot
+    postdate the K3 cutoff, and K3's rates are ~3x higher.
+    """
+    canonical = _canonical_model(wire_model)
+    if canonical is not None:
+        return canonical
+
+    if ts is None:
         return "kimi-k2-7-code"
-    if first_event_ts < MODEL_CUTOFF_DT:
+
+    if ts < MODEL_CUTOFF_DT:
         return "kimi-k2-6"
-    if first_event_ts < K3_CUTOFF_DT:
+
+    # An ambiguous id names a real, non-k3 model: the date only separates the
+    # k2 generations, and must never promote it to k3.
+    if wire_model and wire_model.rsplit("/", 1)[-1] in _AMBIGUOUS_WIRE_MODELS:
+        return "kimi-k2-7-code"
+
+    if ts < K3_CUTOFF_DT:
         return "kimi-k2-7-code"
     return "kimi-k3"
 
