@@ -20,7 +20,7 @@ genuinely cannot answer.
 | # | Finding | Evidence |
 |---|---|---|
 | 1 | The kimi-code wire **carries the model on the `usage.record` itself** — the exact record that becomes a billing row. | `L27 type=usage.record model='kimi-code/k3'` |
-| 2 | **`K3_CUTOFF_EPOCH` is provably wrong.** Real k3 records predate it by 20m41s. | earliest k3 record `2026-07-16 14:45:55.471Z`; constant = `15:06:34Z` |
+| 2 | **`K3_CUTOFF_EPOCH` is provably wrong.** Real k3 records predate it by 20m39s. | earliest k3 record `2026-07-16 14:45:55.471Z`; constant = `15:06:34Z` |
 | 3 | **Model is not a property of a session.** Session `aed8326f` switches `kimi-for-coding` → `k3` mid-session, 24s apart. | L17 `kimi-for-coding` @14:45:34 → L27 `k3` @14:45:55 |
 | 4 | Per-session labelling **leaks across the boundary**: DB has `kimi-k2-7-code` records at `2026-07-16 15:10:14`, after the cutoff, purely because their session started earlier. | `records` table |
 | 5 | **Legacy-format transcripts carry no model string at all** — and are still being produced (`protocol_version 1.10`, dated `2026-07-16 18:25`). Dates are unavoidable for them. | R2 `sessions/2aa458d2…` |
@@ -37,13 +37,27 @@ what the wire cannot express; both are evaluated per-record.**
 Resolution ladder, applied to **each** billing record:
 
 1. Wire model string says `k3` → `kimi-k3`. **Regardless of date.**
-2. Wire model string says `kimi-for-coding` → ambiguous era → the **record's own
-   timestamp** vs `MODEL_CUTOFF_EPOCH` picks `kimi-k2-6` (before) or
-   `kimi-k2-7-code` (at/after). `K3_CUTOFF_EPOCH` is **not** consulted — a wire
-   that says `kimi-for-coding` is not k3, whatever the date.
-3. No/unrecognized model string (legacy format) → full date ladder on the
-   record's own timestamp, exactly as today (both cutoffs).
+2. Wire names **any other** model (`kimi-for-coding`, or an id we do not
+   recognize) → the wire has ruled out k3, so the **record's own timestamp** may
+   only separate the k2 generations: `MODEL_CUTOFF_EPOCH` picks `kimi-k2-6`
+   (before) or `kimi-k2-7-code` (at/after). `K3_CUTOFF_EPOCH` is **not**
+   consulted.
+3. **No** model string at all (legacy format) → full date ladder on the record's
+   own timestamp, exactly as today (both cutoffs).
 4. No timestamp either → `kimi-k2-7-code` (unchanged fallback).
+
+**Amended 2026-07-17 after independent review** (owner adjudicated). Rule 2
+originally shielded only the known-ambiguous `kimi-for-coding`; an *unrecognized*
+id with a post-K3 date rode the full ladder and billed as `kimi-k3`. That
+contradicted this function's own governing principle — rule 4 already refuses to
+drift to the newest label under uncertainty precisely because k3 costs ~3x — and
+it broke `K3_CUTOFF_EPOCH`'s own stated contract ("only applies to records with
+no wire model string"). A *present but unrecognized* string is not the
+"transcript carries no model string" case that justifies the k3 rung. Both
+behaviors are a guess for an unknown id; the conservative guess (under-bill as
+k2-7-code) is the one the rest of the function already commits to. Nothing in the
+live corpus changes either way — only `kimi-for-coding` and `k3` exist today — so
+this decides only how a *future* unknown id fails.
 
 This fixes the user's reported bug **by construction**: k2.7-code used after the
 K3 cutoff hits rule 2 and stays `kimi-k2-7-code`. And k3 used *before* the

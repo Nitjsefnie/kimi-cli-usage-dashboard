@@ -202,7 +202,7 @@ cover what the wire cannot express: legacy transcripts with no model
 string, and kimi-for-coding spanning both k2 generations.
 
 Also corrects K3_CUTOFF_EPOCH: real k3 records predate the old value
-(15:06:34) by 20m41s. Earliest observed is 14:45:55.
+(15:06:34) by 20m39s. Earliest observed is 14:45:55.
 
 Co-Authored-By: Kimi K2.6 <noreply@kimi.com>"
 ```
@@ -471,22 +471,15 @@ const K3_CUTOFF_EPOCH = 1784213155;     // 2026-07-16 14:45:55 UTC, earliest
                                         // records with no wire model string.
 
 const WIRE_MODEL_MAP = { k3: "kimi-k3" };
-const AMBIGUOUS_WIRE_MODELS = new Set(["kimi-for-coding"]);
-
-function wireModelSuffix(wireModel) {
-  if (!wireModel) return null;
-  const parts = wireModel.split("/");
-  return parts[parts.length - 1];
-}
 
 // Raw provider id -> canonical pricing label, or null when the wire cannot
 // settle it alone. Only canonical labels may reach rateForModel: it matches by
 // substring, so a raw "kimi-code/k3" would match nothing and bill at
 // DEFAULT_RATES (k2-6) — a ~3x undercount.
 function canonicalModel(wireModel) {
-  const suffix = wireModelSuffix(wireModel);
-  if (!suffix) return null;
-  return WIRE_MODEL_MAP[suffix] || null;
+  if (!wireModel) return null;
+  const parts = wireModel.split("/");
+  return WIRE_MODEL_MAP[parts[parts.length - 1]] || null;
 }
 
 // Mirrors backend/parse.py _model_for, including the no-timestamp fallback to
@@ -499,11 +492,9 @@ function modelForRecord(wireModel, ts) {
   const epoch = tsToEpoch(ts);
   if (epoch == null) return "kimi-k2-7-code";
   if (epoch < MODEL_CUTOFF_EPOCH) return "kimi-k2-6";
-  // An ambiguous id names a real, non-k3 model: the date only separates the
-  // k2 generations, and must never promote it to k3.
-  if (AMBIGUOUS_WIRE_MODELS.has(wireModelSuffix(wireModel))) {
-    return "kimi-k2-7-code";
-  }
+  // The wire named a model and it is not k3 (else canonicalModel caught it),
+  // so the date may only separate the k2 generations — never promote to k3.
+  if (wireModel) return "kimi-k2-7-code";
   if (epoch < K3_CUTOFF_EPOCH) return "kimi-k2-7-code";
   return "kimi-k3";
 }

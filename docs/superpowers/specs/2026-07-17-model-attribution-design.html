@@ -434,7 +434,7 @@
           </tr>
           <tr>
             <td class="slate">2</td>
-            <td><strong><code>K3_CUTOFF_EPOCH</code> is provably wrong.</strong> Real k3 records predate it by 20m41s and are billed at ~⅓ the true rate.</td>
+            <td><strong><code>K3_CUTOFF_EPOCH</code> is provably wrong.</strong> Real k3 records predate it by 20m39s and are billed at ~⅓ the true rate.</td>
             <td>earliest k3 record <code>2026-07-16 14:45:55.471Z</code>; constant = <code>15:06:34Z</code></td>
           </tr>
           <tr>
@@ -501,17 +501,30 @@
         </div>
         <div class="rung">
           <div class="n">2</div>
-          <div class="t">Wire says <code>kimi-for-coding</code> → ambiguous era → the <strong>record's own timestamp</strong> vs <code>MODEL_CUTOFF_EPOCH</code> picks <strong>kimi-k2-6</strong> (before) or <strong>kimi-k2-7-code</strong> (at/after). <code>K3_CUTOFF_EPOCH</code> is <em>not</em> consulted — a wire that says <code>kimi-for-coding</code> is not k3, whatever the date.</div>
+          <div class="t">Wire names <strong>any other</strong> model (<code>kimi-for-coding</code>, or an id we do not recognize) → the wire has ruled out k3, so the <strong>record's own timestamp</strong> may only separate the k2 generations: <code>MODEL_CUTOFF_EPOCH</code> picks <strong>kimi-k2-6</strong> (before) or <strong>kimi-k2-7-code</strong> (at/after). <code>K3_CUTOFF_EPOCH</code> is <em>not</em> consulted.</div>
         </div>
         <div class="rung">
           <div class="n">3</div>
-          <div class="t">No / unrecognized model string (legacy format) → full date ladder on the record's own timestamp, exactly as today (both cutoffs).</div>
+          <div class="t"><strong>No</strong> model string at all (legacy format) → full date ladder on the record's own timestamp, exactly as today (both cutoffs).</div>
         </div>
         <div class="rung">
           <div class="n">4</div>
           <div class="t">No timestamp either → <strong>kimi-k2-7-code</strong> (unchanged fallback).</div>
         </div>
       </div>
+      <p class="body" style="margin-top:18px"><strong>Amended 2026-07-17 after independent review</strong> (owner adjudicated).
+        Rule 2 originally shielded only the known-ambiguous <code>kimi-for-coding</code>; an
+        <em>unrecognized</em> id with a post-K3 date rode the full ladder and billed as
+        <code>kimi-k3</code>. That contradicted this function's own governing principle — rule 4
+        already refuses to drift to the newest label under uncertainty precisely because k3 costs
+        ~3x — and it broke <code>K3_CUTOFF_EPOCH</code>'s own stated contract ("only applies to
+        records with no wire model string"). A <em>present but unrecognized</em> string is not the
+        "transcript carries no model string" case that justifies the k3 rung. Both behaviors are a
+        guess for an unknown id; the conservative guess (under-bill as k2-7-code) is the one the
+        rest of the function already commits to. Nothing in the live corpus changes either way —
+        only <code>kimi-for-coding</code> and <code>k3</code> exist today — so this decides only how
+        a <em>future</em> unknown id fails.</p>
+
       <p class="body" style="margin-top:18px">This fixes the reported bug <strong>by construction</strong>:
         k2.7-code used after the K3 cutoff hits rule 2 and stays <code>kimi-k2-7-code</code>.
         And k3 used <em>before</em> the cutoff hits rule 1 and is correctly <code>kimi-k3</code>.</p>
