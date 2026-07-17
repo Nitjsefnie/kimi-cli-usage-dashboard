@@ -33,7 +33,7 @@
 - Consumes: nothing from earlier tasks.
 - Produces: `parse._model_for(wire_model: str | None, ts: datetime | None) -> str` and `parse._canonical_model(wire_model: str | None) -> str | None`. Tasks 2 and 3 call `_model_for` with these exact parameter names and order. `parse.K3_CUTOFF_EPOCH`, `parse.K3_CUTOFF_DT`, `parse.MODEL_CUTOFF_EPOCH`, `parse.MODEL_CUTOFF_DT` keep their existing names.
 
-`_canonical_model` returns `"kimi-k3"` for a raw id whose last `/`-segment is `k3`, `None` for `kimi-for-coding` (meaning "ambiguous — ask the date"), and `None` for anything unrecognized or falsy. Because both the ambiguous and unrecognized cases return `None`, `_model_for` distinguishes them by re-inspecting the string: this is why `_model_for` takes the raw `wire_model`, not the normalized value.
+`_canonical_model` returns `"kimi-k3"` for a raw id whose last `/`-segment is `k3`, and `None` for anything else — `kimi-for-coding`, an unrecognized id, or a falsy value. A `None` means "the wire did not settle it", and `_model_for` then needs to know whether a string was nonetheless PRESENT: a present-but-unsettled string has ruled out k3, so the date may only separate the k2 generations. That is why `_model_for` takes the raw `wire_model` rather than the normalized value.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -130,11 +130,9 @@ MODEL_CUTOFF_DT = datetime.fromtimestamp(MODEL_CUTOFF_EPOCH, tz=timezone.utc)
 K3_CUTOFF_DT = datetime.fromtimestamp(K3_CUTOFF_EPOCH, tz=timezone.utc)
 
 # Raw provider id -> canonical pricing label. Only ids that identify a pricing
-# model on their own belong here; "kimi-for-coding" deliberately does not.
+# model on their own belong here; "kimi-for-coding" deliberately does not (it
+# spans both k2 generations, so only a date can separate them).
 _WIRE_MODEL_MAP = {"k3": "kimi-k3"}
-
-# Raw provider ids that name a real model but cannot pin a pricing label alone.
-_AMBIGUOUS_WIRE_MODELS = frozenset({"kimi-for-coding"})
 ```
 
 Then replace `_model_for` (lines 37-53) with:
@@ -174,9 +172,10 @@ def _model_for(wire_model: str | None, ts: datetime | None) -> str:
     if ts < MODEL_CUTOFF_DT:
         return "kimi-k2-6"
 
-    # An ambiguous id names a real, non-k3 model: the date only separates the
-    # k2 generations, and must never promote it to k3.
-    if wire_model and wire_model.rsplit("/", 1)[-1] in _AMBIGUOUS_WIRE_MODELS:
+    # The wire named a model and it is not k3 (else _canonical_model caught
+    # it), so the date may only separate the k2 generations — never promote
+    # to k3.
+    if wire_model:
         return "kimi-k2-7-code"
 
     if ts < K3_CUTOFF_DT:
@@ -608,4 +607,6 @@ Report the before/after table in your final message. The before is:
 
 **Type consistency:** `_model_for(wire_model, ts)` and `_canonical_model(wire_model)` are used with that exact arity and order in Tasks 1-3. JS mirrors are `modelForRecord(wireModel, ts)` / `canonicalModel(wireModel)`, consistent within Task 4.
 
-**Known wrinkle, deliberately handled:** `_canonical_model` returns `None` for both "ambiguous" and "unrecognized". `_model_for` therefore re-checks `_AMBIGUOUS_WIRE_MODELS` to stop `kimi-for-coding` from being promoted to k3 by a late date, while still letting a genuinely unknown id fall through the full ladder. Task 1 Step 3 and Task 4 Step 2 both implement this; the `test_model_for_kimi_for_coding_never_becomes_k3` case pins it.
+**Known wrinkle, deliberately handled:** `_canonical_model` returns `None` whenever the wire does not settle the label — for `kimi-for-coding`, for an unrecognized id, and for no id at all. `_model_for` therefore checks whether `wire_model` is merely PRESENT: if it is, the wire has ruled out k3 (else `_canonical_model` would have caught it), so only the k2 rungs may apply and the date must never promote it to k3. Only a record with NO model string reaches the k3 date rung. Task 1 Step 3 and Task 4 Step 2 both implement this; `test_model_for_kimi_for_coding_never_becomes_k3` and `test_model_for_unrecognized_wire_id_is_never_promoted_to_k3` pin it.
+
+**Amended 2026-07-17 (owner adjudicated).** This originally shielded only `kimi-for-coding` via an `_AMBIGUOUS_WIRE_MODELS` set, letting an unrecognized id ride the full ladder into k3 at ~3x rates. Independent review found that contradicted the function's own no-timestamp rule, which already refuses to drift to the newest label under uncertainty. The set is gone; `if wire_model:` subsumes it.
