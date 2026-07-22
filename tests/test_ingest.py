@@ -179,3 +179,32 @@ def test_first_seen_at_uses_least(fresh_db, mini_r2_env):
             "SELECT first_seen_at FROM projects WHERE project_id = 'projA'"
         ).fetchone()[0]
     assert after < before, f"first_seen_at should move backward: was {before}, now {after}"
+
+
+def test_pool_and_sequential_ingest_agree(fresh_db, mini_r2_env, monkeypatch):
+    """Fetch+parse on a thread pool and sequentially must produce identical
+    persistence."""
+
+    def _counts_after_ingest(workers):
+        monkeypatch.setenv("INGEST_WORKERS", str(workers))
+        result = ingest.run_ingest(trigger="manual")
+        assert result["error"] is None
+        with db.viz_conn() as c:
+            files = c.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+            records = c.execute("SELECT COUNT(*) FROM records").fetchone()[0]
+        return files, records
+
+    seq_files, seq_records = _counts_after_ingest(1)
+
+    # Reset the DB for an independent parallel run.
+    test_db = os.environ["DATABASE_URL_VIZ"].replace("postgresql:///", "")
+    os.system(f"dropdb --if-exists {test_db} 2>/dev/null")
+    os.system(f"createdb {test_db} 2>/dev/null")
+    os.system(f"psql {test_db} -f {_REPO_ROOT / 'backend/schema.sql'} >/dev/null")
+    if db._VIZ is not None:
+        db._VIZ.close()
+    db._VIZ = None
+
+    par_files, par_records = _counts_after_ingest(4)
+    assert seq_files == par_files
+    assert seq_records == par_records
