@@ -99,6 +99,22 @@ function perTurnStats(sessions) {
 function ContextSubPanel({ title, sessions, color, cap, w, h }) {
   const ref = React.useRef(null);
   const [tip, setTip] = React.useState(null);
+  const legRef = React.useRef(null);
+  const [legendAdv, setLegendAdv] = React.useState(0);
+
+  // Advance of the 8.5px legend mono, measured from a rendered label:
+  // predicted advances disagree with the real one because app.css adds
+  // letter-spacing.
+  React.useLayoutEffect(() => {
+    const g = legRef.current;
+    if (!g) return;
+    const t = g.querySelector('text');
+    if (!t || !t.getComputedTextLength) return;
+    const n = (t.textContent || '').length;
+    if (!n) return;
+    const a = t.getComputedTextLength() / n;
+    if (a > 0 && Math.abs(a - legendAdv) > 0.05) setLegendAdv(a);
+  });
 
   // Legend now sits below the plot, so padB grows (x-ticks + legend).
   const padL = 50, padR = 16, padT = 38, padB = 50;
@@ -189,7 +205,7 @@ function ContextSubPanel({ title, sessions, color, cap, w, h }) {
       background: TH_X.bgAxes,
     }}
       onMouseMove={onMove} onMouseLeave={() => setTip(null)}>
-      <svg width={w} height={h} style={{ display: 'block' }}>
+      <svg data-panel={"Context Growth — " + title} width={w} height={h} style={{ display: 'block' }}>
         <text x={padL} y={18} fontSize="11" fontWeight="bold" fill={color}
           fontFamily="monospace">{title}</text>
         <text x={padL} y={32} fontSize="9" fill={TH_X.textDim}
@@ -197,17 +213,41 @@ function ContextSubPanel({ title, sessions, color, cap, w, h }) {
           {nSess.toLocaleString()} agent files · longest: {longest} · max ctx: {humanFmt_X(maxCtx)}
         </text>
 
-        {/* Mini legend, BELOW the plot */}
-        <g transform={`translate(${padL}, ${h - 14})`}>
-          <rect x={0} y={0} width={14} height={8} fill={color} fillOpacity="0.18" />
-          <text x={18} y={7} fontSize="8.5" fill={TH_X.textDim} fontFamily="monospace">active</text>
-          <line x1={52} x2={66} y1={4} y2={4} stroke={color} strokeWidth="0.7" strokeOpacity="0.6" />
-          <text x={70} y={7} fontSize="8.5" fill={TH_X.textDim} fontFamily="monospace">sessions</text>
-          <line x1={108} x2={122} y1={4} y2={4} stroke="#fff" strokeWidth="1.8" />
-          <text x={126} y={7} fontSize="8.5" fill={TH_X.text} fontFamily="monospace">median</text>
-          <rect x={158} y={1} width={14} height={6} fill={color} fillOpacity="0.4" />
-          <text x={176} y={7} fontSize="8.5" fill={TH_X.textDim} fontFamily="monospace">p25–p75</text>
-        </g>
+        {/* Mini legend, BELOW the plot. Placed cumulatively from each label's
+            own width: at the previous fixed x (18/70/126/176) the labels varied
+            in width and ran into the NEXT entry's swatch. */}
+        {(() => {
+          const adv = legendAdv || 5.6;
+          const SW = 14, GAP = 4, SPACING = 12;
+          const items = [
+            { key: 'active', label: 'active', dim: true,
+              mark: <rect x={0} y={0} width={SW} height={8} fill={color} fillOpacity="0.18" /> },
+            { key: 'sessions', label: 'sessions', dim: true,
+              mark: <line x1={0} x2={SW} y1={4} y2={4} stroke={color} strokeWidth="0.7" strokeOpacity="0.6" /> },
+            { key: 'median', label: 'median', dim: false,
+              mark: <line x1={0} x2={SW} y1={4} y2={4} stroke="#fff" strokeWidth="1.8" /> },
+            { key: 'iqr', label: 'p25–p75', dim: true,
+              mark: <rect x={0} y={1} width={SW} height={6} fill={color} fillOpacity="0.4" /> },
+          ];
+          let cx = 0;
+          // h - 18, not h - 14: at 14 the glyph boxes ended 3.5px from the
+          // panel's bottom edge.
+          return (
+            <g ref={legRef} transform={`translate(${padL}, ${h - 18})`}>
+              {items.map(it => {
+                const at = cx;
+                cx += SW + GAP + it.label.length * adv + SPACING;
+                return (
+                  <g key={it.key} transform={`translate(${at}, 0)`}>
+                    {it.mark}
+                    <text x={SW + GAP} y={7} fontSize="8.5"
+                      fill={it.dim ? TH_X.textDim : TH_X.text} fontFamily="monospace">{it.label}</text>
+                  </g>
+                );
+              })}
+            </g>
+          );
+        })()}
 
         {/* Y grid */}
         {yTicks.map((v, i) => (
@@ -221,7 +261,11 @@ function ContextSubPanel({ title, sessions, color, cap, w, h }) {
           <g>
             <line x1={padL} x2={w - padR} y1={yScale(cap)} y2={yScale(cap)}
               stroke="#ff5577" strokeWidth="1" strokeDasharray="2,3" strokeOpacity="0.7" />
-            <text x={w - padR - 4} y={yScale(cap) - 3} fontSize="8.5"
+            {/* Below the cap line, not above it: above, the label shares a
+                band with the panel subtitle, and since one is left-anchored
+                and the other right-anchored they collide once the panel
+                narrows. */}
+            <text x={w - padR - 4} y={yScale(cap) + 11} fontSize="8.5"
               fill="#ff5577" textAnchor="end" fontFamily="monospace">
               {humanFmt_X(cap)} cap
             </text>
@@ -291,7 +335,7 @@ function ContextSubPanel({ title, sessions, color, cap, w, h }) {
 
         {/* Y labels */}
         {yTicks.map((v, i) => (
-          <text key={'yl'+i} x={padL - 6} y={yScale(v) + 3}
+          <text key={'yl'+i} x={padL - 9} y={yScale(v) + 3}
             fontSize="8.5" fill={TH_X.textDim} textAnchor="end" fontFamily="monospace">
             {humanFmt_X(v)}
           </text>
@@ -644,7 +688,7 @@ function ComparisonRow({ models, byModel, w, h }) {
   return (
     <div ref={ref} style={{ position: 'relative', borderBottom: `1px solid ${TH_X.border}` }}
       onMouseMove={onMove} onMouseLeave={() => setTip(null)}>
-      <svg width={w} height={h} style={{ display: 'block' }}>
+      <svg data-panel="Context Growth — comparison" width={w} height={h} style={{ display: 'block' }}>
         <text x={padL} y={20} fontSize="11" fontWeight="bold" fill={TH_X.text}
           fontFamily="monospace">
           {titleText}
@@ -653,8 +697,15 @@ function ComparisonRow({ models, byModel, w, h }) {
         {/* Legend — one cluster per checked model. Wraps at edge.
             Sits BELOW the plot area now (was above the title). */}
         {(() => {
-          const clusterW = 270;
-          const legendBaseY = padT + plotH + 30;  // below x-tick labels
+          // Cluster geometry follows the widest model name instead of fixed
+          // 86/108 offsets: "kimi-k2-7-code" is 14 chars and overran the swatch
+          // that "opus-4-8" cleared.
+          const advL = (typeof monoAdvancePx === 'function' ? monoAdvancePx(9.5) : 6.1);
+          const nameW = Math.ceil(Math.max(0, ...series.map(s => s.model.length)) * advL);
+          const medW = Math.ceil(Math.max(0, ...series.map(
+            s => `median (${s.count.toLocaleString()} files)`.length)) * advL);
+          const clusterW = 9 + nameW + 30 + medW + 28;
+          const legendBaseY = padT + plotH + 42;  // below the axis caption
           return series.map((s, i) => {
             const c = (window.modelColors && window.modelColors[s.model]) || '#888';
             const x = padL + (i * clusterW) % Math.max(1, plotW);
@@ -663,8 +714,8 @@ function ComparisonRow({ models, byModel, w, h }) {
               <g key={s.model} transform={`translate(${x}, ${yRow})`}>
                 <rect x={0} y={0} width={4} height={12} fill={c} />
                 <text x={9} y={9} fontSize="9.5" fontWeight="700" fill={c} fontFamily="monospace">{s.model}</text>
-                <line x1={86} x2={102} y1={5} y2={5} stroke={c} strokeWidth="2" />
-                <text x={108} y={9} fontSize="9.5" fill={TH_X.text} fontFamily="monospace">
+                <line x1={9 + nameW + 8} x2={9 + nameW + 24} y1={5} y2={5} stroke={c} strokeWidth="2" />
+                <text x={9 + nameW + 30} y={9} fontSize="9.5" fill={TH_X.text} fontFamily="monospace">
                   median ({s.count.toLocaleString()} files)
                 </text>
               </g>
@@ -703,9 +754,12 @@ function ComparisonRow({ models, byModel, w, h }) {
             stroke="#fff" strokeOpacity="0.3" strokeDasharray="2,3" />
         )}
 
-        {/* Y labels */}
-        {yTicks.map((v, i) => (
-          <text key={'yl'+i} x={padL - 6} y={yScale(v) + 3}
+        {/* Y labels. A tick within one label-height of the cap line is
+            dropped: cap is max(baseCap, observedMax * 1.05), so it lands
+            just off a round tick and the two labels overlapped. The cap
+            label wins, being the one that carries meaning. */}
+        {yTicks.filter(v => Math.abs(yScale(v) - yScale(cap)) >= 12).map((v, i) => (
+          <text key={'yl'+i} x={padL - 9} y={yScale(v) + 3}
             fontSize="9" fill={TH_X.textDim} textAnchor="end" fontFamily="monospace">
             {humanFmt_X(v)}
           </text>
@@ -720,7 +774,11 @@ function ComparisonRow({ models, byModel, w, h }) {
         <text x={14} y={padT + plotH/2} fontSize="9" fill={TH_X.textDim}
           textAnchor="middle" fontFamily="monospace"
           transform={`rotate(-90 14 ${padT + plotH/2})`}>context size</text>
-        <text x={(padL + w - padR)/2} y={h - 4} fontSize="9" fill={TH_X.textDim}
+        {/* The caption gets its own band between the x ticks and the legend.
+            Pinned to the bottom it shared a 1px-apart band with the legend,
+            and since it is centred while the legend is left-anchored at fixed
+            clusters, narrower viewports slid it into a legend entry. */}
+        <text x={(padL + w - padR)/2} y={padT + plotH + 33} fontSize="9" fill={TH_X.textDim}
           textAnchor="middle" fontFamily="monospace">turn number within session</text>
       </svg>
       {tip && <window.DashTooltip tip={tip} />}
@@ -797,6 +855,19 @@ function ResponseSizesPanel({ data, bucketS }) {
   const ref = React.useRef(null);
   const [w, setW] = React.useState(1200);
   const [tip, setTip] = React.useState(null);
+  const [yLabelPx, setYLabelPx] = React.useState(0);
+
+  // Widest rendered y label, so the gutter tracks the labels instead of being
+  // a fixed budget that a wider decade silently consumes.
+  React.useLayoutEffect(() => {
+    if (!ref.current) return;
+    let m = 0;
+    ref.current.querySelectorAll('text[data-yl-label]').forEach(e => {
+      const len = e.getComputedTextLength ? e.getComputedTextLength() : 0;
+      if (len > m) m = len;
+    });
+    if (m > 0 && Math.abs(m - yLabelPx) > 0.5) setYLabelPx(m);
+  });
   React.useEffect(() => {
     if (!ref.current) return;
     const ro = new ResizeObserver(es => setW(es[0].contentRect.width));
@@ -863,7 +934,13 @@ function ResponseSizesPanel({ data, bucketS }) {
   const logYMin = Math.log10(yMin);
   const logYMax = Math.log10(yMax);
 
-  const padL = 56, padR = 30, padT = 16, padB = 30;
+  // padL tracks the y labels (anchored at padL - 9) so they stay clear of
+  // the rotated caption.
+  const padR = 30, padT = 16, padB = 30;
+  const padL = Math.min(
+    Math.max(56, w * 0.15),
+    Math.max(56, Math.ceil(yLabelPx) + 32)
+  );
   const h = 280;
   const plotW = Math.max(20, w - padL - padR);
   const plotH = h - padT - padB;
@@ -983,7 +1060,7 @@ function ResponseSizesPanel({ data, bucketS }) {
       </div>
 
       <div style={{ position: 'relative' }} onMouseMove={onMove} onMouseLeave={() => setTip(null)}>
-        <svg width={w} height={h} style={{ display: 'block' }}>
+        <svg data-panel="Response Sizes" width={w} height={h} style={{ display: 'block' }}>
           {/* Y grid */}
           {yTicks.map((v, i) => (
             <line key={'g'+i} x1={padL} x2={w - padR}
@@ -1022,7 +1099,7 @@ function ResponseSizesPanel({ data, bucketS }) {
 
           {/* Y labels */}
           {yTicks.map((v, i) => (
-            <text key={'yl'+i} x={padL - 6} y={yScale(v) + 3}
+            <text data-yl-label="" key={'yl'+i} x={padL - 9} y={yScale(v) + 3}
               fontSize="9" fill={TH_X.textDim} textAnchor="end" fontFamily="monospace">
               {window.humanFmt(v)}
             </text>
@@ -1300,7 +1377,9 @@ function ToolErrorSubPanel({ modelName, modelData, w, h, bucketMs }) {
   const xMin = modelData.buckets.length ? modelData.buckets[0] : 0;
   const xMax = modelData.buckets.length ? modelData.buckets[modelData.buckets.length - 1] + bucketMs : 1;
 
-  const padL = 38, padR = 6, padT = 22, padB = 22;
+  // padL 50, not 38: y labels are end-anchored at padL - 5 and a 5-char
+  // percentage renders ~29px wide, leaving only ~4px to the panel edge.
+  const padL = 50, padR = 6, padT = 22, padB = 22;
   const plotW = Math.max(1, w - padL - padR);
   const plotH = Math.max(1, h - padT - padB);
   const xs = (t) => padL + ((t - xMin) / Math.max(1, xMax - xMin)) * plotW;
@@ -1374,7 +1453,7 @@ function ToolErrorSubPanel({ modelName, modelData, w, h, bucketMs }) {
       </div>
 
       <div style={{ position: 'relative' }} onMouseMove={onMove} onMouseLeave={() => setTip(null)}>
-        <svg width={w} height={h} style={{ display: 'block' }}>
+        <svg data-panel={"Tool Error Rate — " + modelName} width={w} height={h} style={{ display: 'block' }}>
           {/* y axis */}
           <line x1={padL} y1={padT} x2={padL} y2={padT + plotH} stroke={TH_X.border} />
           <line x1={padL} y1={padT + plotH} x2={padL + plotW} y2={padT + plotH} stroke={TH_X.border} />
@@ -1847,7 +1926,7 @@ function ToolUsagePanel({ models, project, range, nonce }) {
       </div>
 
       <div style={{ position: 'relative' }} onMouseMove={onMove} onMouseLeave={() => setTip(null)}>
-        <svg width={w} height={h} style={{ display: 'block' }}>
+        <svg data-panel="Tool Usage Ratio" width={w} height={h} style={{ display: 'block' }}>
           {/* Y grid */}
           {yTicks.map((v, i) => (
             <line key={'g'+i} x1={padL} x2={w - padR}
@@ -1863,7 +1942,7 @@ function ToolUsagePanel({ models, project, range, nonce }) {
 
           {/* Y labels */}
           {yTicks.map((v, i) => (
-            <text key={'yl'+i} x={padL - 6} y={yScale(v) + 3}
+            <text key={'yl'+i} x={padL - 9} y={yScale(v) + 3}
               fontSize="9" fill={TH_X.textDim} textAnchor="end" fontFamily="monospace">
               {(v * 100).toFixed(0)}%
             </text>
@@ -2169,7 +2248,7 @@ function ReplyLatencyPanel({ project, range, nonce, models }) {
       </div>
 
       <div style={{ position: 'relative' }} onMouseMove={onMove} onMouseLeave={() => setTip(null)}>
-        <svg width={w} height={h} style={{ display: 'block' }}>
+        <svg data-panel="Reply Latency" width={w} height={h} style={{ display: 'block' }}>
           {yTicks.map((v, i) => (
             <line key={'g'+i} x1={padL} x2={w - padR}
               y1={yScale(v)} y2={yScale(v)}
@@ -2213,7 +2292,7 @@ function ReplyLatencyPanel({ project, range, nonce, models }) {
           )}
 
           {yTicks.map((v, i) => (
-            <text key={'yl'+i} x={padL - 6} y={yScale(v) + 3}
+            <text key={'yl'+i} x={padL - 9} y={yScale(v) + 3}
               fontSize="9" fill={TH_X.textDim} textAnchor="end" fontFamily="monospace">
               {v < 1 ? v.toFixed(1) + 's'
                : v < 60 ? Math.round(v) + 's'
@@ -2449,7 +2528,7 @@ function ActivityHeatmapPanel({ models, project, range, nonce }) {
         </div>
       </div>
 
-      <svg width="100%" height={h} style={{ display: 'block' }}
+      <svg data-panel="Activity Heatmap" width="100%" height={h} style={{ display: 'block' }}
            onMouseLeave={() => setTip(null)}>
         {/* Separator lines in the SUM_GAP bands — margins read as distinct. */}
         <line x1={padL + 23 * (cellW + gap) + cellW + SUM_GAP / 2}
@@ -2542,7 +2621,7 @@ function ActivityHeatmapPanel({ models, project, range, nonce }) {
         fontFamily: 'monospace', fontSize: 10, color: TH_X.textDim,
       }}>
         <span>0</span>
-        <svg width={legendW} height="10">
+        <svg data-panel="Activity Heatmap — legend" width={legendW} height="10">
           <defs>
             <linearGradient id="heatLegendGrad" x1="0" y1="0" x2="1" y2="0">
               <stop offset="0%"  stopColor={mspec.color} stopOpacity="0.05" />

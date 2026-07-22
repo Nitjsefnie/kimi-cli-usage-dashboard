@@ -66,6 +66,33 @@ function humanCurrency(v) {
   return '$' + v.toFixed(2);
 }
 
+// Per-character advance of the dashboard's monospace face, measured once per
+// font size and cached. It must be measured with getComputedTextLength() on a
+// real SVG text node under a .dashboard ancestor, because app.css applies
+//   .dashboard svg text { font-family: var(--mono); letter-spacing: 0.04em }
+// and letter-spacing is invisible to canvas measureText.
+function monoAdvancePx(fontSize) {
+  monoAdvancePx._c = monoAdvancePx._c || {};
+  if (monoAdvancePx._c[fontSize]) return monoAdvancePx._c[fontSize];
+  const NS = 'http://www.w3.org/2000/svg';
+  const host = document.createElement('div');
+  host.className = 'dashboard';
+  host.style.cssText =
+    'position:absolute;left:-9999px;top:0;height:0;overflow:hidden;visibility:hidden';
+  const svg = document.createElementNS(NS, 'svg');
+  const text = document.createElementNS(NS, 'text');
+  text.setAttribute('font-size', String(fontSize));
+  text.setAttribute('font-family', 'monospace');
+  const SAMPLE = '0123456789';
+  text.textContent = SAMPLE;
+  svg.appendChild(text);
+  host.appendChild(svg);
+  document.body.appendChild(host);
+  const adv = text.getComputedTextLength() / SAMPLE.length;
+  document.body.removeChild(host);
+  return (monoAdvancePx._c[fontSize] = adv > 0 ? adv : fontSize * 0.64);
+}
+
 function fmtDate(ts, opts = {}) {
   const d = new Date(ts);
   const M = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -185,6 +212,27 @@ function TimeSeriesPanel({ title, events, valueKey, color, isCurrency, range, bi
   const ref = React.useRef(null);
   const [size, setSize] = React.useState({ w: 600, h: 280 });
   const [tip, setTip] = React.useState(null);
+  const [yLabelPx, setYLabelPx] = React.useState(0);
+  const [yrLabelPx, setYrLabelPx] = React.useState(0);
+
+  // Measure the rendered labels rather than predicting them from a font
+  // metric. Runs before paint, so the corrected padding is never a visible
+  // reflow, and it self-corrects if the font or CSS changes.
+  React.useLayoutEffect(() => {
+    if (!ref.current) return;
+    let m = 0;
+    ref.current.querySelectorAll('text[data-yl-label]').forEach(t => {
+      const len = t.getComputedTextLength ? t.getComputedTextLength() : 0;
+      if (len > m) m = len;
+    });
+    if (m > 0 && Math.abs(m - yLabelPx) > 0.5) setYLabelPx(m);
+    let r = 0;
+    ref.current.querySelectorAll('text[data-yr-label]').forEach(t => {
+      const len = t.getComputedTextLength ? t.getComputedTextLength() : 0;
+      if (len > r) r = len;
+    });
+    if (r > 0 && Math.abs(r - yrLabelPx) > 0.5) setYrLabelPx(r);
+  });
 
   React.useEffect(() => {
     if (!ref.current) return;
@@ -197,7 +245,20 @@ function TimeSeriesPanel({ title, events, valueKey, color, isCurrency, range, bi
   }, []);
 
   const { w, h } = size;
-  const padL = 50, padR = 50, padT = 28, padB = 28;
+  // padR is the right gutter: it holds the cumulative-axis labels and the
+  // rotated "cumulative" title whose box sits at w-21..w-9. At the old 50 the
+  // labels had 23px before the title and "100M" is exactly 23.0px wide, so
+  // wider values collided. padL likewise grows with its own labels.
+  // padR holds the cumulative-axis labels (start-anchored at padR - 6 from
+  // the edge) and the rotated "cumulative" title occupying w-21..w-9, so the
+  // widest label needs padR - 27 - width of clearance; +35 keeps ~8px. Fixed
+  // at 70, a 7-char currency label like "$200.00" (42.8px) left 0.2px.
+  const padT = 28, padB = 28;
+  const padR = Math.max(70, Math.ceil(yrLabelPx) + 35);
+  const padL = Math.min(
+    Math.max(60, w * 0.25),
+    Math.max(50, Math.ceil(yLabelPx) + 32)
+  );
   const plotW = Math.max(10, w - padL - padR);
   const plotH = Math.max(10, h - padT - padB);
 
@@ -259,20 +320,26 @@ function TimeSeriesPanel({ title, events, valueKey, color, isCurrency, range, bi
     const rect = ref.current.getBoundingClientRect();
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
-    if (mx < padL || mx > w - padR || my < padT || my > padT + plotH) {
+    // The last bin starts at (or past) the plot's right edge whenever the
+    // range isn't an exact multiple of binMs, so its bar body sits in the
+    // right padding. Without widening the band by one bar, that bar has a
+    // 0px-wide hover zone and simply cannot be inspected.
+    if (mx < padL || mx > w - padR + barW || my < padT || my > padT + plotH) {
       setTip(null);
       return;
     }
-    const frac = (mx - padL) / plotW;
-    const ts = range.start + frac * (range.end - range.start);
-    let idx = Math.floor((ts - range.start) / binMs);
+    // Snap to the nearest bar centre instead of flooring the time fraction.
+    // Flooring hands the final (usually partial) bin a sliver of a zone while
+    // every other bin gets a full pitch.
+    const pitch = plotW * binMs / Math.max(1, range.end - range.start);
+    let idx = Math.round((mx - padL - barW / 2) / pitch);
     if (idx < 0) idx = 0;
     if (idx >= bins.length) idx = bins.length - 1;
     const b = bins[idx];
     const cum = cumPts[idx + 1];  // +1 to skip the leading (range.start, 0) anchor
     setTip({
-      x: mx, y: my,
-      title: `${fmtDate(b.start, {day:true})} – ${fmtDate(b.end, {day:true})}`,
+      x: mx, y: my, idx,
+      title: `${fmtDate(b.start, {full:true})} – ${fmtDate(b.end, {full:true})} UTC`,
       accent: color,
       lines: [
         ['period',     humanFmt(b.sum, isCurrency)],
@@ -290,7 +357,7 @@ function TimeSeriesPanel({ title, events, valueKey, color, isCurrency, range, bi
     }}
     onMouseMove={onMouseMove}
     onMouseLeave={() => setTip(null)}>
-      <svg width={w} height={h} style={{ display: 'block' }}>
+      <svg data-panel={title} width={w} height={h} style={{ display: 'block' }}>
         {yTicksL.map((v, idx) => (
           <line key={'g'+idx} x1={padL} x2={w - padR}
             y1={yBar(v)} y2={yBar(v)}
@@ -299,7 +366,7 @@ function TimeSeriesPanel({ title, events, valueKey, color, isCurrency, range, bi
         {bins.map((b, idx) => {
           const x = xScale(b.start);
           const y = yBar(b.sum);
-          const isHover = tip && Math.floor((tip.x - padL) / plotW * (range.end - range.start) / binMs) === idx;
+          const isHover = tip && tip.idx === idx;
           return (
             <rect key={idx} x={x} y={y} width={barW} height={Math.max(0, padT + plotH - y)}
               fill={color} fillOpacity={isHover ? 0.85 : 0.3} />
@@ -322,37 +389,48 @@ function TimeSeriesPanel({ title, events, valueKey, color, isCurrency, range, bi
         )}
 
         {yTicksL.map((v, idx) => (
-          <text key={'yl'+idx} x={padL - 6} y={yBar(v) + 4}
+          <text data-yl-label="" key={'yl'+idx} x={padL - 6} y={yBar(v) + 4}
             fontSize="9" fill={TH.textDim} textAnchor="end" fontFamily="monospace">
             {humanFmt(v, isCurrency)}
           </text>
         ))}
         {yTicksR.map((v, idx) => (
-          <text key={'yr'+idx} x={w - padR + 6} y={yCum(v) + 4}
+          <text data-yr-label="" key={'yr'+idx} x={w - padR + 6} y={yCum(v) + 4}
             fontSize="9" fill={TH.textDim} textAnchor="start" fontFamily="monospace">
             {humanFmt(v, isCurrency)}
           </text>
         ))}
-        {ticks.map((t, idx) => (
-          <text key={'x'+idx} x={xScale(t.ts)} y={h - padB + 14}
-            fontSize="9" fill={TH.textDim} textAnchor="middle" fontFamily="monospace">
-            {t.label}
-          </text>
-        ))}
+        {/* x is clamped so an edge tick's label stays inside the plot band.
+            Centred on its tick, the first label overhangs padL and collides
+            with the y-axis "0" whenever the range is short enough that a tick
+            lands at the plot's left edge (day ticks do this; month ticks
+            happened not to). */}
+        {ticks.map((t, idx) => {
+          const halfW = String(t.label).length * monoAdvancePx(9) / 2 + 4;
+          const cx = Math.min(Math.max(xScale(t.ts), padL + halfW), w - padR - halfW);
+          return (
+            <text key={'x'+idx} x={cx} y={h - padB + 14}
+              fontSize="9" fill={TH.textDim} textAnchor="middle" fontFamily="monospace">
+              {t.label}
+            </text>
+          );
+        })}
 
         <text x={w/2} y={18} fontSize="13" fontWeight="bold" fill={TH.text}
           textAnchor="middle" fontFamily="monospace">{title}</text>
 
-        <text x={12} y={padT + plotH/2} fontSize="9" fill={TH.textDim}
+        {/* x=17 not 12: at 12 the rotated caption's box started 3px from the
+            panel edge. */}
+        <text x={17} y={padT + plotH/2} fontSize="9" fill={TH.textDim}
           textAnchor="middle" fontFamily="monospace"
-          transform={`rotate(-90 12 ${padT + plotH/2})`}>per {binMsLabel(binMs)}</text>
+          transform={`rotate(-90 17 ${padT + plotH/2})`}>per {binMsLabel(binMs)}</text>
         <text x={w - 12} y={padT + plotH/2} fontSize="9" fill={TH.textDim}
           textAnchor="middle" fontFamily="monospace"
           transform={`rotate(-90 ${w - 12} ${padT + plotH/2})`}>cumulative</text>
 
         {(() => {
           const totalStr = `Total: ${humanFmt(total, isCurrency)}`;
-          const boxW = Math.round(totalStr.length * 6.6) + 16;
+          const boxW = Math.ceil(totalStr.length * monoAdvancePx(11)) + 16;
           const boxX = w - padR - boxW - 6;
           return (
             <g>
@@ -377,6 +455,21 @@ function HBar({ title, rows, totalForPct, fmt, fixedColors, embedded }) {
   const [w, setW] = React.useState(600);
   const [hover, setHover] = React.useState(null);
   const [mouse, setMouse] = React.useState({ x: 0, y: 0 });
+  const [labelPx, setLabelPx] = React.useState(0);
+
+  // Measure the labels as they actually render instead of predicting their
+  // width from a font metric: the old chars x 6.6px estimate was ~7% short of
+  // the 7.041px/char the CSS letter-spacing actually produces, and the
+  // shortfall came out of the left margin.
+  React.useLayoutEffect(() => {
+    if (!ref.current) return;
+    let m = 0;
+    ref.current.querySelectorAll('text[data-hbar-label]').forEach(t => {
+      const len = t.getComputedTextLength ? t.getComputedTextLength() : 0;
+      if (len > m) m = len;
+    });
+    if (m > 0 && Math.abs(m - labelPx) > 0.5) setLabelPx(m);
+  });
 
   React.useEffect(() => {
     if (!ref.current) return;
@@ -390,11 +483,14 @@ function HBar({ title, rows, totalForPct, fmt, fixedColors, embedded }) {
   const h = 32 + rows.length * 36 + 18;
   // Dynamic left pad: fits the widest label at 11px monospace
   // (~6.6px/char), clamped so the bar still has room.
-  const FONT_CHAR_PX = 6.6;
-  const longestLabelChars = rows.reduce((m, r) => Math.max(m, (r.label || '').length), 0);
+  // Labels are end-anchored at padL - 8, so the left margin is whatever this
+  // budget leaves over; +20 buys that 8px plus a 12px edge margin. labelPx is
+  // the measured width; the estimate only seeds the first paint.
+  const estLabelPx = monoAdvancePx(11) *
+    rows.reduce((m, r) => Math.max(m, (r.label || '').length), 0);
   const padL = Math.min(
     Math.max(60, w * 0.45),
-    Math.ceil(longestLabelChars * FONT_CHAR_PX) + 16
+    Math.ceil(Math.max(labelPx, estLabelPx)) + 20
   );
   const padR = 60, padT = 32;
   const plotW = Math.max(10, w - padL - padR);
@@ -427,7 +523,7 @@ function HBar({ title, rows, totalForPct, fmt, fixedColors, embedded }) {
       setMouse({ x: e.clientX - rect.left, y: e.clientY - rect.top });
     }}
     onMouseLeave={() => setHover(null)}>
-      <svg width={w} height={h} style={{ display: 'block' }}>
+      <svg data-panel={title} width={w} height={h} style={{ display: 'block' }}>
         <text x={w/2} y={20} fontSize="13" fontWeight="bold" fill={TH.text}
           textAnchor="middle" fontFamily="monospace">{title}</text>
         {rows.map((r, idx) => {
@@ -441,7 +537,7 @@ function HBar({ title, rows, totalForPct, fmt, fixedColors, embedded }) {
               onMouseEnter={() => setHover(idx)}
               style={{ cursor: 'pointer' }}>
               <rect x={0} y={y} width={w} height={32} fill="transparent" />
-              <text x={padL - 8} y={y + 18} fontSize="11" fill={TH.text}
+              <text data-hbar-label="" x={padL - 8} y={y + 18} fontSize="11" fill={TH.text}
                 textAnchor="end" fontFamily="monospace">{r.label}</text>
               <rect x={padL} y={y + 4} width={Math.max(2, barW)} height={26}
                 fill={c} fillOpacity={isHover ? 1 : 0.85}
@@ -464,6 +560,27 @@ function BurnRatePanel({ events, sessions, limitHits, range: propRange, windowBo
   const ref = React.useRef(null);
   const [size, setSize] = React.useState({ w: 1200, h: 360 });
   const [tip, setTip] = React.useState(null);
+  const [legendAdv, setLegendAdv] = React.useState(0);
+  const [yLabelPx, setYLabelPx] = React.useState(0);
+
+  // Legend advance and widest y label, both measured from nodes that painted.
+  React.useLayoutEffect(() => {
+    if (!ref.current) return;
+    const t = ref.current.querySelector('text[data-legend-item]');
+    if (t && t.getComputedTextLength) {
+      const n = (t.textContent || '').length;
+      if (n) {
+        const a = t.getComputedTextLength() / n;
+        if (a > 0 && Math.abs(a - legendAdv) > 0.05) setLegendAdv(a);
+      }
+    }
+    let m = 0;
+    ref.current.querySelectorAll('text[data-yl-label]').forEach(e => {
+      const len = e.getComputedTextLength ? e.getComputedTextLength() : 0;
+      if (len > m) m = len;
+    });
+    if (m > 0 && Math.abs(m - yLabelPx) > 0.5) setYLabelPx(m);
+  });
 
   React.useEffect(() => {
     if (!ref.current) return;
@@ -495,7 +612,13 @@ function BurnRatePanel({ events, sessions, limitHits, range: propRange, windowBo
     return { start: lo, end: hi };
   })();
   // Top is just title (no legend); bottom has x-tick labels + the legend.
-  const padL = 60, padR = 30, padT = 30, padB = 56;
+  // padL sized from the measured y labels: labels are end-anchored at
+  // padL - 8 and the rotated caption's box ends near x=22, so +40 keeps ~10px.
+  const padR = 30, padT = 30, padB = 56;
+  const padL = Math.min(
+    Math.max(60, w * 0.2),
+    Math.max(60, Math.ceil(yLabelPx) + 40)
+  );
   const plotW = Math.max(10, w - padL - padR);
   const plotH = Math.max(10, h - padT - padB);
 
@@ -709,7 +832,7 @@ function BurnRatePanel({ events, sessions, limitHits, range: propRange, windowBo
     }}
     onMouseMove={onMove}
     onMouseLeave={() => setTip(null)}>
-      <svg width={w} height={h} style={{ display: 'block' }}>
+      <svg data-panel="Session Burn Rate" width={w} height={h} style={{ display: 'block' }}>
         <defs>
           <clipPath id="burn-plot-clip">
             <rect x={padL} y={padT} width={plotW} height={plotH} />
@@ -720,7 +843,7 @@ function BurnRatePanel({ events, sessions, limitHits, range: propRange, windowBo
           Session Burn Rate  |  {fmtDate(range.start, {day:true})} – {fmtDate(range.end, {day:true})}, {new Date(range.end).getUTCFullYear()} UTC  |  {sessions.length.toLocaleString()} sessions, {events.reduce((s,e)=>s+(e.requests==null?1:e.requests),0).toLocaleString()} requests
         </text>
         {yTicks.map((v, i) => (
-          <text key={'yl'+i} x={padL - 8} y={yScale(v) + 4}
+          <text data-yl-label="" key={'yl'+i} x={padL - 8} y={yScale(v) + 4}
             fontSize="10" fill={TH.textDim} textAnchor="end" fontFamily="monospace">
             {humanFmt(v)}
           </text>
@@ -778,22 +901,46 @@ function BurnRatePanel({ events, sessions, limitHits, range: propRange, windowBo
             {t.label}
           </text>
         ))}
-        <text x={14} y={padT + plotH/2} fontSize="10" fill={TH.textDim}
+        {/* x=18 not 14: rotated text's box extends about one ascent to the
+            left of its baseline, so at 14 it began 3.5px from the edge. */}
+        <text x={18} y={padT + plotH/2} fontSize="10" fill={TH.textDim}
           textAnchor="middle" fontFamily="monospace"
-          transform={`rotate(-90 14 ${padT + plotH/2})`}>Tokens per hour (EMA) / 100 × Cost per hour</text>
+          transform={`rotate(-90 18 ${padT + plotH/2})`}>Tokens per hour (EMA) / 100 × Cost per hour</text>
 
-        <g transform={`translate(${padL + 20}, ${h - 22})`}>
-          {Object.entries(series).map(([k, s], i) => (
-            <g key={k} transform={`translate(${i * 130}, 0)`}>
-              <line x1={0} x2={20} y1={6} y2={6} stroke={s.color} strokeWidth="2" />
-              <text x={26} y={10} fontSize="10" fill={TH.text} fontFamily="monospace">{s.label} (EMA)</text>
+        {/* Entries are laid out cumulatively from their own widths and wrap,
+            rather than sitting on a fixed 130px pitch: a label wider than the
+            pitch had the NEXT entry's swatch drawn inside it, and an unwrapped
+            row ran off the panel on narrow viewports. */}
+        {(() => {
+          const items = Object.entries(series).map(([k, s]) => (
+            { key: k, color: s.color, label: `${s.label} (EMA)` }));
+          items.push({ key: '__ratelimit', color: '#ff3366', label: 'Rate limit hit' });
+          const adv = legendAdv || 6.4;
+          // ROW 16, not 13: a label's glyph box is ~13px tall, so a 13px pitch
+          // made wrapped rows touch.
+          const SWATCH = 20, GAP = 6, SPACING = 24, ROW = 16;
+          const avail = Math.max(120, w - (padL + 20) - padR);
+          let cx = 0, row = 0;
+          const placed = items.map(it => {
+            const wEntry = SWATCH + GAP + it.label.length * adv + SPACING;
+            if (cx > 0 && cx + wEntry > avail) { row += 1; cx = 0; }
+            const at = cx, r = row;
+            cx += wEntry;
+            return { ...it, at, row: r };
+          });
+          const nRows = row + 1;
+          return (
+            <g transform={`translate(${padL + 20}, ${h - 22 - (nRows - 1) * ROW})`}>
+              {placed.map(it => (
+                <g key={it.key} transform={`translate(${it.at}, ${it.row * ROW})`}>
+                  <line x1={0} x2={SWATCH} y1={6} y2={6} stroke={it.color} strokeWidth="2" />
+                  <text data-legend-item="" x={SWATCH + GAP} y={10} fontSize="10"
+                    fill={TH.text} fontFamily="monospace">{it.label}</text>
+                </g>
+              ))}
             </g>
-          ))}
-          <g transform={`translate(${4 * 130}, 0)`}>
-            <line x1={0} x2={20} y1={6} y2={6} stroke="#ff3366" strokeWidth="2" />
-            <text x={26} y={10} fontSize="10" fill={TH.text} fontFamily="monospace">Rate limit hit</text>
-          </g>
-        </g>
+          );
+        })()}
       </svg>
       <Tooltip tip={tip} />
     </div>
