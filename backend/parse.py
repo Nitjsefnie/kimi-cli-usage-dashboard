@@ -242,7 +242,7 @@ def _parse_legacy(file_key: str, blob: bytes) -> dict:
 
             # Kimi wire format does not embed model per event; fall back to a
             # hardcoded time-based assignment using the session's first event.
-            model = _model_for(first_event_ts)
+            model = _model_for(None, first_event_ts)
             cost = pricing.compute_cost(
                 model,
                 fresh=fresh, create=create, read=read, output=output,
@@ -520,7 +520,7 @@ def _parse_kimi_code(file_key: str, blob: bytes) -> dict:
                     reply_latency_s = delta_s
             pending_turn_begin_ts = None
 
-            model = _model_for(first_event_ts)
+            model = _model_for(None, first_event_ts)
             cost = pricing.compute_cost(
                 model,
                 fresh=fresh, create=create, read=read, output=output,
