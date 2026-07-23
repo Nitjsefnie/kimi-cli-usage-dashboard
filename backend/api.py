@@ -29,7 +29,7 @@ router = APIRouter(prefix="/api")
 
 
 # Kimi-only ingest right now — parse.py emits one of these for every record.
-# When kimi-dash starts ingesting other ecosystems (Claude jsonls, etc.)
+# When kimimeter starts ingesting other ecosystems (Claude jsonls, etc.)
 # the JOIN-by-line_num assumption breaks for those sources too; at that
 # point promote model to a `tool_uses.model` column populated at parse time.
 _ONLY_MODELS = ("kimi-k2-6", "kimi-k2-7-code", "kimi-k3")

@@ -1,4 +1,4 @@
-# kimi-dash
+# kimimeter
 
 @README.md
 

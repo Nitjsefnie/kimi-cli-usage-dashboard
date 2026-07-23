@@ -1,6 +1,6 @@
 """/login GET + POST + /logout.
 
-Login UI is inlined HTML (no shared layout chrome — kimi-dash uses
+Login UI is inlined HTML (no shared layout chrome — kimimeter uses
 its own visualizer dark theme). Rate limiting: 5 failures per IP per
 5-minute window.
 """

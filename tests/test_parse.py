@@ -1,4 +1,4 @@
-"""parse.py — per-file extraction from Kimi Code CLI wire.jsonl.
+"""parse.py — per-file extraction from Kimi Code wire.jsonl.
 
 Each parse_file call returns:
   - records: one entry per StatusUpdate with token_usage.

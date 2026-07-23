@@ -1,6 +1,6 @@
 """Per-model cost rates (USD per million tokens).
 
-SINGLE SOURCE OF TRUTH for cost in kimi-dash.
+SINGLE SOURCE OF TRUTH for cost in kimimeter.
 Bump PARSER_VERSION when this table changes — every session reparses.
 
 Kimi wire format token categories:

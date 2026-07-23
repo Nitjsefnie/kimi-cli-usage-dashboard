@@ -1,4 +1,4 @@
-"""FastAPI entrypoint for kimi-dash."""
+"""FastAPI entrypoint for kimimeter."""
 from __future__ import annotations
 
 import os
@@ -54,7 +54,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="kimi-dash",
+    title="kimimeter",
     docs_url=None,
     redoc_url=None,
     lifespan=lifespan,
